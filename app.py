@@ -524,22 +524,2602 @@ init_db()
 seed_users()
 seed_drills()
 
+# =========================================================
+# AUTH / PERMISSIONS
+# =========================================================
+
+ROLE_PERMISSIONS = {
+    "admin": {
+        "generate",
+        "edit_content",
+        "import",
+        "delete",
+        "manage_templates",
+        "manage_users",
+        "archive",
+        "favorite",
+        "whiteboard",
+        "view_dashboard",
+    },
+    "coach": {
+        "generate",
+        "edit_content",
+        "import",
+        "manage_templates",
+        "favorite",
+        "whiteboard",
+        "view_dashboard",
+    },
+    "assistant": {
+        "generate",
+        "favorite",
+        "whiteboard",
+        "view_dashboard",
+    },
+    "read_only": {
+        "view_dashboard",
+    },
+}
+
+
+def get_current_user() -> Optional[Dict[str, Any]]:
+    """Return the currently logged-in user from Streamlit session state."""
+    return st.session_state.get("user")
+
+
+def is_logged_in() -> bool:
+    """Check whether a user is currently logged in."""
+    return get_current_user() is not None
+
+
+def has_perm(permission: str) -> bool:
+    """Check whether the current user has a specific permission."""
+    current_user = get_current_user()
+    if not current_user:
+        return False
+    return permission in ROLE_PERMISSIONS.get(current_user["role"], set())
+
+
+def require_permission(permission: str) -> None:
+    """Stop execution if the current user lacks a permission."""
+    if not has_perm(permission):
+        st.error("You do not have permission to access this section.")
+        st.stop()
+
+
+def get_user_by_username(username: str) -> Optional[sqlite3.Row]:
+    """Fetch a user row by username."""
+    return fetch_one(
+        "SELECT * FROM users WHERE username = ? AND is_active = 1",
+        (username.strip(),),
+    )
+
+
+def verify_login(username: str, password: str) -> Optional[Dict[str, Any]]:
+    """Validate credentials and return a user dict if successful."""
+    row = get_user_by_username(username)
+    if not row:
+        return None
+
+    if row["password_hash"] != sha256_text(password):
+        return None
+
+    return {
+        "id": row["id"],
+        "username": row["username"],
+        "display_name": row["display_name"],
+        "role": row["role"],
+    }
+
+
+def login_user(user_dict: Dict[str, Any]) -> None:
+    """Persist authenticated user into Streamlit session state."""
+    st.session_state["user"] = user_dict
+    st.session_state.setdefault("nav", "Dashboard")
+
+
+def logout() -> None:
+    """Clear auth-related session state and rerun."""
+    keys_to_clear = [
+        "user",
+        "nav",
+        "current_workout",
+        "current_program",
+    ]
+    for key in keys_to_clear:
+        if key in st.session_state:
+            del st.session_state[key]
+    st.rerun()
+
+
+def login_screen() -> None:
+    """Render the login screen."""
+    st.title("🥊 Boxing With Bakr")
+    st.caption("Internal Coach Platform")
+
+    st.markdown('<div class="bwb-card">', unsafe_allow_html=True)
+
+    username = st.text_input("Username", key="login_username")
+    password = st.text_input("Password", type="password", key="login_password")
+
+    col1, col2 = st.columns([1, 2])
+
+    with col1:
+        if st.button("Login", use_container_width=True):
+            authenticated = verify_login(username, password)
+            if authenticated:
+                login_user(authenticated)
+                st.success("Login successful.")
+                st.rerun()
+            else:
+                st.error("Invalid credentials.")
+
+    with col2:
+        st.info(
+            "Default accounts:\n\n"
+            f"- admin / {DEFAULT_ADMIN_PASSWORD}\n"
+            "- coach / coach123"
+        )
+
+    st.markdown("</div>", unsafe_allow_html=True)
+
 
 # =========================================================
-# SAFE PLACEHOLDER
+# UI / GENERAL HELPERS
 # =========================================================
 
-st.title(APP_TITLE)
-st.caption("Phase 1 foundation loaded successfully.")
+def clean_text(text: str) -> str:
+    """Normalize whitespace in a string."""
+    return re.sub(r"\s+", " ", str(text or "")).strip()
 
-st.info(
-    "This file currently includes:\n"
-    "- imports\n"
-    "- config\n"
-    "- theme\n"
-    "- SQLite connection\n"
-    "- DB helpers\n"
-    "- schema creation\n"
-    "- seed users/drills\n\n"
-    "Next phase should add auth + navigation or generator logic."
-)
+
+def parse_tags(value: str) -> List[str]:
+    """Split a comma-separated tag string into a clean list."""
+    if not value:
+        return []
+    return [x.strip() for x in value.split(",") if x.strip()]
+
+
+def to_int(value: Any, default: int = 0) -> int:
+    """Convert value to int safely."""
+    try:
+        return int(value)
+    except Exception:
+        return default
+
+
+def seconds_to_label(seconds: int) -> str:
+    """Render seconds as a readable label."""
+    if seconds <= 0:
+        return "0s"
+    if seconds % 60 == 0:
+        return f"{seconds // 60} min"
+    return f"{seconds}s"
+
+
+def list_to_pills(items: List[str]) -> str:
+    """Render a list of tags/equipment as styled pills."""
+    return "".join(
+        [f'<span class="bwb-pill">{clean_text(item)}</span>' for item in items if clean_text(item)]
+    )
+
+
+def safe_get_session_list(key: str) -> List[Any]:
+    """Ensure a session-state key exists as a list."""
+    if key not in st.session_state or not isinstance(st.session_state[key], list):
+        st.session_state[key] = []
+    return st.session_state[key]
+
+
+def safe_get_session_dict(key: str) -> Dict[str, Any]:
+    """Ensure a session-state key exists as a dict."""
+    if key not in st.session_state or not isinstance(st.session_state[key], dict):
+        st.session_state[key] = {}
+    return st.session_state[key]
+
+
+def metric_card(label: str, value: Any, help_text: str = "") -> None:
+    """Render a styled KPI card."""
+    st.markdown(
+        f"""
+        <div class="bwb-kpi">
+            <div class="bwb-subtle">{label}</div>
+            <div style="font-size: 1.8rem; font-weight: 800; margin-top: 4px;">{value}</div>
+            <div class="bwb-subtle" style="margin-top: 6px;">{help_text}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def render_user_badge() -> None:
+    """Show the current user badge in the sidebar."""
+    current_user = get_current_user()
+    if not current_user:
+        return
+
+    st.sidebar.markdown(
+        f"""
+        <div class="bwb-card" style="padding: 12px;">
+            <div style="font-weight: 700;">{current_user['display_name']}</div>
+            <div class="bwb-subtle">@{current_user['username']} · {current_user['role']}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def get_navigation_options() -> List[str]:
+    """Return the sidebar navigation options."""
+    return [
+        "Dashboard",
+        "Generate Class",
+        "Generate Program",
+        "Drill Library",
+        "Saved Workouts",
+        "Templates",
+        "Whiteboard Archive",
+        "Import Content",
+        "Settings",
+    ]
+
+
+def render_sidebar_navigation() -> str:
+    """
+    Render the sidebar shell and return the selected nav item.
+    Must only be called after login.
+    """
+    current_user = get_current_user()
+    if not current_user:
+        return "Login"
+
+    with st.sidebar:
+        st.title("BWB Coach Platform")
+        render_user_badge()
+
+        nav = st.radio(
+            "Navigation",
+            options=get_navigation_options(),
+            key="nav",
+        )
+
+        st.markdown("---")
+
+        if st.button("Log Out", use_container_width=True):
+            logout()
+
+    return nav
+
+
+def render_top_shell() -> str:
+    """
+    Handle auth gate and render the sidebar shell.
+    Returns the selected page name.
+    """
+    if not is_logged_in():
+        login_screen()
+        st.stop()
+
+    return render_sidebar_navigation()
+
+
+def render_placeholder_page(title: str, description: str) -> None:
+    """Simple placeholder page renderer for pages not yet implemented."""
+    st.title(title)
+    st.markdown(
+        f"""
+        <div class="bwb-card">
+            <div>{description}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def render_dashboard_shell() -> None:
+    """Minimal dashboard shell that works before core logic is added."""
+    require_permission("view_dashboard")
+
+    st.title("Dashboard")
+
+    c1, c2, c3, c4 = st.columns(4)
+    with c1:
+        metric_card("Saved Workouts", "—", "Workout logic added in later phase")
+    with c2:
+        metric_card("Active Drills", "—", "Drill queries added in later phase")
+    with c3:
+        metric_card("Programs", "—", "Program logic added in later phase")
+    with c4:
+        metric_card("Whiteboards", "—", "Whiteboard logic added in later phase")
+
+    st.markdown("### System Status")
+    st.success("Auth, permissions, sidebar shell, and DB foundation are loaded.")
+
+    st.markdown("### Current User")
+    current_user = get_current_user()
+    if current_user:
+        st.write(f"**Name:** {current_user['display_name']}")
+        st.write(f"**Username:** {current_user['username']}")
+        st.write(f"**Role:** {current_user['role']}")
+
+
+# =========================================================
+# BOXING LOGIC ENGINE
+# =========================================================
+
+PUNCH_MAP = {
+    "1": {"name": "jab", "hand": "lead", "type": "straight", "range": "long"},
+    "2": {"name": "straight", "hand": "rear", "type": "straight", "range": "long"},
+    "3": {"name": "lead hook", "hand": "lead", "type": "hook", "range": "mid"},
+    "4": {"name": "rear hook", "hand": "rear", "type": "hook", "range": "mid"},
+    "5": {"name": "lead uppercut", "hand": "lead", "type": "uppercut", "range": "close"},
+    "6": {"name": "rear uppercut", "hand": "rear", "type": "uppercut", "range": "close"},
+    "7": {"name": "lead body", "hand": "lead", "type": "body", "range": "mid"},
+    "8": {"name": "rear body", "hand": "rear", "type": "body", "range": "mid"},
+    "OVR": {"name": "overhand right", "hand": "rear", "type": "overhand", "range": "mid"},
+    "OVL": {"name": "overhand left", "hand": "lead", "type": "overhand", "range": "mid"},
+}
+
+DEFENSE_ACTIONS = [
+    "slip outside",
+    "slip inside",
+    "roll under",
+    "pull back",
+    "pivot out",
+    "step back reset",
+    "angle out",
+    "level change",
+    "shuffle out",
+    "step in behind jab",
+]
+
+TACTICAL_THEMES = [
+    "technique development",
+    "conditioning",
+    "endurance",
+    "power",
+    "movement quality",
+    "body punching",
+    "defense",
+    "counterpunching",
+    "angle work",
+    "boxing-specific strength",
+    "cardio capacity",
+]
+
+
+def combo_complexity_by_level(level: str) -> int:
+    """
+    Return target combo complexity by class level.
+    """
+    mapping = {
+        "beginner": 3,
+        "intermediate": 4,
+        "advanced": 5,
+        "fighter": 6,
+        "teen": 3,
+        "general fitness": 3,
+        "all": 4,
+    }
+    return mapping.get(level.lower(), 4)
+
+
+def choose_opening_by_theme(theme: str) -> List[str]:
+    """
+    Choose a sensible combo opener based on tactical focus.
+    """
+    theme = theme.lower()
+
+    if "body" in theme:
+        return random.choice([
+            ["1", "7"],
+            ["1", "2", "7"],
+            ["2", "3", "7"],
+        ])
+
+    if "defense" in theme or "counter" in theme:
+        return random.choice([
+            ["1", "2"],
+            ["1", "slip outside", "2"],
+            ["pull back", "2", "3"],
+        ])
+
+    if "angle" in theme or "movement" in theme:
+        return random.choice([
+            ["1", "2", "pivot out"],
+            ["1", "3", "angle out"],
+            ["1", "2", "shuffle out"],
+        ])
+
+    if "power" in theme:
+        return random.choice([
+            ["1", "2", "3"],
+            ["1", "OVR", "3"],
+            ["2", "3", "2"],
+        ])
+
+    return random.choice([
+        ["1", "2"],
+        ["1", "1", "2"],
+        ["1", "2", "3"],
+    ])
+
+
+def legal_followups(prev: str, theme: str) -> List[str]:
+    """
+    Return logically valid follow-up options after a prior token.
+    Includes punches, exits, defense, and theme-biased choices.
+    """
+    if prev not in PUNCH_MAP:
+        return ["1", "2", "3", "pivot out", "angle out", "step back reset"]
+
+    prev_meta = PUNCH_MAP[prev]
+    hand = prev_meta["hand"]
+    range_zone = prev_meta["range"]
+
+    options: List[str] = []
+
+    # Hand alternation base
+    for code, meta in PUNCH_MAP.items():
+        if meta["hand"] != hand:
+            options.append(code)
+
+    # Logical continuations
+    if prev in {"1", "2"}:
+        options.extend(["3", "7", "pivot out", "step back reset"])
+
+    if prev in {"3", "4"}:
+        options.extend(["2", "6", "roll under", "angle out"])
+
+    if prev in {"5", "6", "7", "8"}:
+        options.extend(["3", "2", "roll under", "pivot out"])
+
+    # Theme bias
+    t = theme.lower()
+
+    if "body" in t:
+        options.extend(["7", "8", "5", "6"])
+
+    if "defense" in t:
+        options.extend(["slip outside", "roll under", "pull back", "pivot out"])
+
+    if "angle" in t or "movement" in t:
+        options.extend(["angle out", "pivot out", "shuffle out"])
+
+    if "power" in t:
+        options.extend(["OVR", "3", "2"])
+
+    # Range-aware bias
+    if range_zone == "long":
+        options.extend(["1", "2", "3"])
+    elif range_zone == "mid":
+        options.extend(["3", "4", "7", "8", "2"])
+    else:
+        options.extend(["5", "6", "3", "roll under", "pivot out"])
+
+    # Deduplicate while keeping order
+    return list(dict.fromkeys(options))
+
+
+def render_combo_for_coach(tokens: List[str]) -> str:
+    """
+    Return the coach-facing combo string using punch numbers / action terms.
+    """
+    return " - ".join(tokens)
+
+
+def combo_to_plain_language(tokens: List[str]) -> str:
+    """
+    Convert combo tokens into athlete-friendly language.
+    """
+    readable = []
+    for token in tokens:
+        if token in PUNCH_MAP:
+            readable.append(PUNCH_MAP[token]["name"])
+        else:
+            readable.append(token)
+    return ", then ".join(readable)
+
+
+def generate_boxing_combo(
+    level: str,
+    theme: str,
+    intensity: str,
+    beginner_safe: bool = False,
+) -> Dict[str, str]:
+    """
+    Generate a technically coherent boxing combo with cues/explanation.
+    """
+    target_len = combo_complexity_by_level(level)
+
+    if intensity.lower() in {"technical", "recovery-focused"}:
+        target_len = max(2, target_len - 1)
+    elif intensity.lower() in {"high intensity", "conditioning-focused"}:
+        target_len = min(7, target_len + 1)
+
+    if beginner_safe:
+        target_len = min(target_len, 4)
+
+    tokens = choose_opening_by_theme(theme)
+
+    while len(tokens) < target_len:
+        prev = tokens[-1]
+        options = legal_followups(prev, theme)
+
+        if beginner_safe:
+            options = [o for o in options if o not in {"OVR", "OVL", "4"}]
+
+        next_token = random.choice(options)
+        tokens.append(next_token)
+
+        if len(tokens) < target_len and random.random() < 0.25:
+            defense = random.choice(["slip outside", "roll under", "pivot out", "angle out"])
+            if defense not in tokens[-2:]:
+                tokens.append(defense)
+
+        if len(tokens) >= target_len:
+            break
+
+    if tokens[-1] in PUNCH_MAP and random.random() < 0.7:
+        tokens.append(random.choice(["pivot out", "step back reset", "angle out"]))
+
+    coach = render_combo_for_coach(tokens)
+    plain = combo_to_plain_language(tokens)
+
+    why = (
+        f"This sequence supports {theme.lower()} by linking offense with "
+        f"defensive transition and better positional exits."
+    )
+
+    cues = "Stay balanced, eyes up, finish each exchange with your feet under you."
+
+    if "body" in theme.lower():
+        cues = "Change levels without folding the chest. Touch body cleanly, then come back upstairs or exit."
+
+    if "angle" in theme.lower():
+        cues = "Do not stand in front after the last punch. Land and move."
+
+    if "power" in theme.lower():
+        cues = "Rotate through the floor and hips, but do not overswing."
+
+    return {
+        "combo": coach,
+        "athlete_friendly": plain,
+        "why": why,
+        "cues": cues,
+        "mistakes": (
+            "Common mistakes: overreaching, squaring up, admiring the combo, "
+            "and dropping the opposite hand."
+        ),
+    }
+
+
+# =========================================================
+# DRILL LIBRARY HELPERS
+# =========================================================
+
+def drill_row_to_dict(row: sqlite3.Row) -> Dict[str, Any]:
+    """
+    Convert a SQLite row from drills into a Python dict with decoded JSON fields.
+    """
+    d = dict(row)
+    d["equipment"] = load_json(d.get("equipment_json", "[]"), [])
+    d["constraints"] = load_json(d.get("constraints_json", "{}"), {})
+    return d
+
+
+def get_drills(
+    category: Optional[str] = None,
+    level: Optional[str] = None,
+    include_archived: bool = False,
+    equipment_filter: Optional[List[str]] = None,
+    tactical_focus: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    """
+    Query all drills in memory and filter them.
+    """
+    rows = fetch_all("SELECT * FROM drills")
+    drills = [drill_row_to_dict(r) for r in rows]
+
+    filtered: List[Dict[str, Any]] = []
+
+    for d in drills:
+        if not include_archived and d["is_archived"]:
+            continue
+
+        if category and d["category"] != category:
+            continue
+
+        if level and d["level"] not in {level, "all"}:
+            continue
+
+        if tactical_focus and tactical_focus.lower() not in clean_text(d.get("tactical_focus", "")).lower():
+            continue
+
+        if equipment_filter:
+            if not set(equipment_filter).issubset(set(d["equipment"])):
+                continue
+
+        filtered.append(d)
+
+    return filtered
+
+
+def choose_drill_from_library(
+    category: str,
+    level: str,
+    equipment_available: List[str],
+    focus: str,
+    constraints: Dict[str, Any],
+    fallback_name: str,
+) -> Dict[str, Any]:
+    """
+    Pick a drill from the drill library that matches constraints.
+    Returns a fallback drill if no drill matches.
+    """
+    candidates = get_drills(category=category, level=level)
+    allowed: List[Dict[str, Any]] = []
+
+    for d in candidates:
+        c = d["constraints"]
+
+        if constraints.get("no_partner_drills") and c.get("needs_partner"):
+            continue
+
+        if constraints.get("no_bags") and c.get("needs_bag"):
+            continue
+
+        if constraints.get("low_impact_only") and not c.get("low_impact_ok", False):
+            continue
+
+        if constraints.get("bodyweight_only_strength") and category in {"strength", "core"}:
+            if set(d["equipment"]) - {"bodyweight"}:
+                continue
+
+        if equipment_available:
+            if not set(d["equipment"]).issubset(set(equipment_available) | {"bodyweight"}):
+                continue
+
+        if focus and d.get("tactical_focus"):
+            if focus.lower() in d["tactical_focus"].lower():
+                allowed.append(d)
+                continue
+
+        allowed.append(d)
+
+    if allowed:
+        return random.choice(allowed)
+
+    return {
+        "name": fallback_name,
+        "explanation": f"Fallback {category} drill because no library drill matched all constraints.",
+        "athlete_description": fallback_name,
+        "coaching_notes": "Coach to the standard and keep structure simple.",
+        "rounds_default": 1,
+        "round_length_sec": 180,
+        "rest_sec": 30,
+        "equipment": ["bodyweight"],
+        "category": category,
+    }
+
+
+# =========================================================
+# WORKOUT GENERATION HELPERS
+# =========================================================
+
+def make_round_item(
+    title: str,
+    details: str,
+    coach_cues: str,
+    explanation: str,
+    athlete_desc: str,
+    rounds: int = 0,
+    round_length_sec: int = 0,
+    rest_sec: int = 0,
+) -> Dict[str, Any]:
+    """
+    Create a standardized workout item block.
+    """
+    return {
+        "title": title,
+        "details": details,
+        "coach_cues": coach_cues,
+        "explanation": explanation,
+        "athlete_description": athlete_desc,
+        "rounds": rounds,
+        "round_length_sec": round_length_sec,
+        "rest_sec": rest_sec,
+    }
+
+
+def build_constraints_dict(
+    limited_space: bool,
+    no_partner_drills: bool,
+    no_bags: bool,
+    low_impact_only: bool,
+    bodyweight_only_strength: bool,
+    beginner_safe_only: bool,
+    mixed_level: bool,
+) -> Dict[str, Any]:
+    """
+    Standardize class constraints into a single dict.
+    """
+    return {
+        "limited_space": limited_space,
+        "no_partner_drills": no_partner_drills,
+        "no_bags": no_bags,
+        "low_impact_only": low_impact_only,
+        "bodyweight_only_strength": bodyweight_only_strength,
+        "beginner_safe_only": beginner_safe_only,
+        "mixed_level": mixed_level,
+    }
+
+
+def section_duration_map(
+    format_name: str,
+    total_duration: int,
+    custom_split: Dict[str, int],
+) -> Dict[str, int]:
+    """
+    Map class format names to section durations.
+    """
+    if format_name == "Standard 60 Boxing":
+        return {
+            "warmup": 15,
+            "partner": 15,
+            "bag": 15,
+            "strength_or_core": 10,
+            "cooldown": 5,
+        }
+
+    if format_name == "30 Boxing / 30 Strength":
+        return {
+            "warmup": 10,
+            "partner": 10,
+            "bag": 10,
+            "strength_or_core": 25,
+            "cooldown": 5,
+        }
+
+    if format_name == "30 Boxing / 30 Cardio":
+        return {
+            "warmup": 10,
+            "partner": 10,
+            "bag": 10,
+            "cardio": 25,
+            "cooldown": 5,
+        }
+
+    if format_name == "40 Boxing / 20 Strength":
+        return {
+            "warmup": 10,
+            "partner": 15,
+            "bag": 15,
+            "strength_or_core": 15,
+            "cooldown": 5,
+        }
+
+    if format_name == "45 Boxing / 15 Conditioning":
+        return {
+            "warmup": 12,
+            "partner": 15,
+            "bag": 18,
+            "cardio": 10,
+            "cooldown": 5,
+        }
+
+    if format_name == "20 / 20 / 20 Hybrid":
+        return {
+            "warmup": 8,
+            "partner": 10,
+            "bag": 10,
+            "strength_or_core": 12,
+            "cardio": 15,
+            "cooldown": 5,
+        }
+
+    if format_name == "Custom":
+        d = {
+            "warmup": custom_split.get("warmup", 10),
+            "partner": custom_split.get("partner", 10),
+            "bag": custom_split.get("bag", 10),
+            "strength_or_core": custom_split.get("strength_or_core", 10),
+            "cardio": custom_split.get("cardio", 10),
+            "cooldown": custom_split.get("cooldown", 5),
+        }
+        total = sum(d.values())
+        if total != total_duration:
+            diff = total_duration - total
+            d["cooldown"] = max(3, d["cooldown"] + diff)
+        return d
+
+    return {
+        "warmup": 12,
+        "partner": 15,
+        "bag": 15,
+        "strength_or_core": 13,
+        "cooldown": 5,
+    }
+
+
+# =========================================================
+# SECTION BUILDERS
+# =========================================================
+
+def generate_warmup_section(
+    level: str,
+    theme: str,
+    duration_min: int,
+    equipment: List[str],
+    constraints: Dict[str, Any],
+) -> Dict[str, Any]:
+    """
+    Build a warm-up section that primes the tactical goal.
+    """
+    warmup_drill = choose_drill_from_library(
+        category="warmup",
+        level=level,
+        equipment_available=equipment,
+        focus=theme,
+        constraints=constraints,
+        fallback_name="Jump Rope + Shadowboxing Prep",
+    )
+
+    combo = generate_boxing_combo(
+        level=level,
+        theme=theme,
+        intensity="technical",
+        beginner_safe=constraints.get("beginner_safe_only", False),
+    )
+
+    items = [
+        make_round_item(
+            title=warmup_drill["name"],
+            details=warmup_drill["explanation"],
+            coach_cues=warmup_drill.get("coaching_notes", ""),
+            explanation=warmup_drill["explanation"],
+            athlete_desc=warmup_drill.get("athlete_description", ""),
+            rounds=warmup_drill.get("rounds_default", 0),
+            round_length_sec=warmup_drill.get("round_length_sec", 0),
+            rest_sec=warmup_drill.get("rest_sec", 0),
+        ),
+        make_round_item(
+            title="Technical Shadowboxing Build",
+            details=f"Work this flow: {combo['combo']}",
+            coach_cues=combo["cues"],
+            explanation="This primes the exact movements and tactical theme before partner or bag work begins.",
+            athlete_desc=combo["athlete_friendly"],
+            rounds=2,
+            round_length_sec=180,
+            rest_sec=30,
+        ),
+    ]
+
+    notes = f"Warm-up should prepare for {theme.lower()} and raise temperature without blowing up the room early."
+
+    return {
+        "name": "Warm-Up",
+        "duration_min": duration_min,
+        "coach_notes": notes,
+        "items": items,
+    }
+
+
+def generate_partner_section(
+    level: str,
+    theme: str,
+    duration_min: int,
+    equipment: List[str],
+    constraints: Dict[str, Any],
+    rounds: int,
+    round_length_sec: int,
+    rest_sec: int,
+) -> Dict[str, Any]:
+    """
+    Build partner drill section or solo substitute if no partners allowed.
+    """
+    if constraints.get("no_partner_drills"):
+        return {
+            "name": "Technical Drills",
+            "duration_min": duration_min,
+            "coach_notes": "Partner work unavailable. Replaced with solo technical flows.",
+            "items": [
+                make_round_item(
+                    title="Mirror Shadowboxing Reaction Rounds",
+                    details="Athletes mirror the coach’s offense-defense calls without partners.",
+                    coach_cues="Keep reactions clean and stay organized between calls.",
+                    explanation="Substitutes partner timing and reading work when partner drills are not possible.",
+                    athlete_desc="React to coach commands with clean offense and defense.",
+                    rounds=rounds,
+                    round_length_sec=round_length_sec,
+                    rest_sec=rest_sec,
+                )
+            ],
+        }
+
+    library_drill = choose_drill_from_library(
+        category="partner",
+        level=level,
+        equipment_available=equipment,
+        focus=theme,
+        constraints=constraints,
+        fallback_name="Partner Timing Rounds",
+    )
+
+    combos = [
+        generate_boxing_combo(
+            level=level,
+            theme=theme,
+            intensity="moderate",
+            beginner_safe=constraints.get("beginner_safe_only", False),
+        )
+        for _ in range(max(2, rounds))
+    ]
+
+    items: List[Dict[str, Any]] = []
+
+    for i, combo in enumerate(combos, start=1):
+        items.append(
+            make_round_item(
+                title=f"Partner Round {i}",
+                details=f"Technical pattern: {combo['combo']}",
+                coach_cues=combo["cues"],
+                explanation=(
+                    f"{combo['why']} Use partner rounds to teach the read, response, "
+                    "and exit before the bag reinforces volume."
+                ),
+                athlete_desc=combo["athlete_friendly"],
+                rounds=1,
+                round_length_sec=round_length_sec,
+                rest_sec=rest_sec,
+            )
+        )
+
+    items.insert(
+        0,
+        make_round_item(
+            title=library_drill["name"],
+            details=library_drill["explanation"],
+            coach_cues=library_drill.get("coaching_notes", ""),
+            explanation=library_drill["explanation"],
+            athlete_desc=library_drill.get("athlete_description", ""),
+            rounds=library_drill.get("rounds_default", 0),
+            round_length_sec=library_drill.get("round_length_sec", 0),
+            rest_sec=library_drill.get("rest_sec", 0),
+        ),
+    )
+
+    return {
+        "name": "Partner Drills",
+        "duration_min": duration_min,
+        "coach_notes": "Teach the concept first, then add pace, defense, and decision-making.",
+        "items": items,
+    }
+
+
+def generate_bag_section(
+    level: str,
+    theme: str,
+    duration_min: int,
+    equipment: List[str],
+    constraints: Dict[str, Any],
+    rounds: int,
+    round_length_sec: int,
+    rest_sec: int,
+) -> Dict[str, Any]:
+    """
+    Build bag section or solo substitute if no bags available.
+    """
+    if constraints.get("no_bags"):
+        return {
+            "name": "Boxing Rounds",
+            "duration_min": duration_min,
+            "coach_notes": "Heavy bags unavailable. Replaced with shadowboxing / station boxing rounds.",
+            "items": [
+                make_round_item(
+                    title="Shadowboxing Pressure Rounds",
+                    details="Athletes perform the same technical focus with sharper pace and cleaner exits.",
+                    coach_cues="Punch through full range, defend after offense, and own the reset.",
+                    explanation="Maintains the reinforcement phase of class without bags.",
+                    athlete_desc="High-quality boxing rounds in place of bag work.",
+                    rounds=rounds,
+                    round_length_sec=round_length_sec,
+                    rest_sec=rest_sec,
+                )
+            ],
+        }
+
+    bag_drill = choose_drill_from_library(
+        category="bag",
+        level=level,
+        equipment_available=equipment,
+        focus=theme,
+        constraints=constraints,
+        fallback_name="Heavy Bag Reinforcement Rounds",
+    )
+
+    items = [
+        make_round_item(
+            title=bag_drill["name"],
+            details=bag_drill["explanation"],
+            coach_cues=bag_drill.get("coaching_notes", ""),
+            explanation=bag_drill["explanation"],
+            athlete_desc=bag_drill.get("athlete_description", ""),
+            rounds=bag_drill.get("rounds_default", 0),
+            round_length_sec=bag_drill.get("round_length_sec", 0),
+            rest_sec=bag_drill.get("rest_sec", 0),
+        )
+    ]
+
+    for i in range(1, rounds + 1):
+        combo = generate_boxing_combo(
+            level=level,
+            theme=theme,
+            intensity="conditioning-focused" if i >= rounds - 1 else "moderate",
+            beginner_safe=constraints.get("beginner_safe_only", False),
+        )
+
+        pacing = "Build clean volume." if i < rounds else "Last round: maintain form under fatigue."
+
+        items.append(
+            make_round_item(
+                title=f"Bag Round {i}",
+                details=f"Work {combo['combo']} with bag emphasis on {theme.lower()}. {pacing}",
+                coach_cues=combo["cues"],
+                explanation="Bag work reinforces mechanics with more output and less hesitation than partner rounds.",
+                athlete_desc=combo["athlete_friendly"],
+                rounds=1,
+                round_length_sec=round_length_sec,
+                rest_sec=rest_sec,
+            )
+        )
+
+    return {
+        "name": "Heavy Bag",
+        "duration_min": duration_min,
+        "coach_notes": "Reinforce the earlier lesson. Volume is allowed, but not sloppy reps.",
+        "items": items,
+    }
+
+
+def generate_strength_section(
+    level: str,
+    theme: str,
+    duration_min: int,
+    equipment: List[str],
+    constraints: Dict[str, Any],
+    intensity: str,
+) -> Dict[str, Any]:
+    """
+    Build strength/core section matching boxing needs.
+    """
+    strength_candidates: List[Dict[str, Any]] = []
+
+    for cat in ["strength", "core"]:
+        strength_candidates.extend(
+            get_drills(category=cat, level=level, equipment_filter=None, tactical_focus=None)
+        )
+
+    allowed: List[Dict[str, Any]] = []
+
+    for d in strength_candidates:
+        c = d["constraints"]
+
+        if constraints.get("low_impact_only") and not c.get("low_impact_ok", False):
+            continue
+
+        if constraints.get("bodyweight_only_strength"):
+            if set(d["equipment"]) - {"bodyweight"}:
+                continue
+
+        if equipment:
+            if not set(d["equipment"]).issubset(set(equipment) | {"bodyweight"}):
+                continue
+
+        allowed.append(d)
+
+    if not allowed:
+        allowed = [
+            {
+                "name": "Pushup + Split Squat + Plank Circuit",
+                "explanation": "Fallback boxing-specific strength circuit.",
+                "athlete_description": "Bodyweight strength circuit for trunk and lower-body control.",
+                "coaching_notes": "Clean reps, no rushing.",
+                "rounds_default": 3,
+                "round_length_sec": 45,
+                "rest_sec": 20,
+            }
+        ]
+
+    chosen = random.sample(allowed, k=min(3, len(allowed)))
+    format_name = random.choice(["circuit", "EMOM", "timed rounds", "station rotation", "AMRAP"])
+
+    items: List[Dict[str, Any]] = []
+
+    for d in chosen:
+        items.append(
+            make_round_item(
+                title=d["name"],
+                details=f"{d.get('explanation', '')} Format: {format_name}.",
+                coach_cues=d.get("coaching_notes", ""),
+                explanation=d.get("explanation", ""),
+                athlete_desc=d.get("athlete_description", ""),
+                rounds=d.get("rounds_default", 3),
+                round_length_sec=d.get("round_length_sec", 45),
+                rest_sec=d.get("rest_sec", 20),
+            )
+        )
+
+    notes = (
+        "Strength should complement the boxing theme: rotation, anti-rotation, stance stability, "
+        "hip drive, punching endurance, and trunk control."
+    )
+
+    return {
+        "name": "Strength / Core",
+        "duration_min": duration_min,
+        "coach_notes": notes,
+        "items": items,
+    }
+
+
+def generate_cardio_section(
+    level: str,
+    theme: str,
+    duration_min: int,
+    equipment: List[str],
+    constraints: Dict[str, Any],
+    intensity: str,
+) -> Dict[str, Any]:
+    """
+    Build cardio / conditioning section.
+    """
+    cardio_drills = get_drills(category="cardio", level=level)
+    allowed: List[Dict[str, Any]] = []
+
+    for d in cardio_drills:
+        c = d["constraints"]
+
+        if constraints.get("low_impact_only") and not c.get("low_impact_ok", False):
+            continue
+
+        if equipment:
+            if not set(d["equipment"]).issubset(set(equipment) | {"bodyweight"}):
+                continue
+
+        allowed.append(d)
+
+    if not allowed:
+        allowed = [
+            {
+                "name": "Marching Shadowboxing Intervals",
+                "explanation": "Low-equipment fallback cardio choice.",
+                "athlete_description": "Fast boxing intervals with active recovery.",
+                "coaching_notes": "Keep output high while maintaining position.",
+                "rounds_default": 5,
+                "round_length_sec": 90,
+                "rest_sec": 30,
+            }
+        ]
+
+    chosen = random.sample(allowed, k=min(2, len(allowed)))
+
+    items: List[Dict[str, Any]] = []
+
+    for d in chosen:
+        items.append(
+            make_round_item(
+                title=d["name"],
+                details=d.get("explanation", ""),
+                coach_cues=d.get("coaching_notes", ""),
+                explanation=d.get("explanation", ""),
+                athlete_desc=d.get("athlete_description", ""),
+                rounds=d.get("rounds_default", 4),
+                round_length_sec=d.get("round_length_sec", 90),
+                rest_sec=d.get("rest_sec", 30),
+            )
+        )
+
+    items.append(
+        make_round_item(
+            title="Finisher Intervals",
+            details="30s on / 15s off for boxing footwork + straight-punch pace bursts.",
+            coach_cues="Fast hands, feet under you, no flaring elbows.",
+            explanation="Finishes the session with controlled fatigue exposure specific to boxing.",
+            athlete_desc="Short hard bursts with quick recovery windows.",
+            rounds=6,
+            round_length_sec=30,
+            rest_sec=15,
+        )
+    )
+
+    return {
+        "name": "Cardio / Conditioning",
+        "duration_min": duration_min,
+        "coach_notes": "Cardio should stay specific to the class goal when possible.",
+        "items": items,
+    }
+
+
+def generate_cooldown_section(
+    level: str,
+    duration_min: int,
+    equipment: List[str],
+    constraints: Dict[str, Any],
+) -> Dict[str, Any]:
+    """
+    Build cooldown / mobility section.
+    """
+    drill = choose_drill_from_library(
+        category="cooldown",
+        level=level,
+        equipment_available=equipment,
+        focus="recovery",
+        constraints=constraints,
+        fallback_name="Breathing + Mobility Reset",
+    )
+
+    return {
+        "name": "Cooldown / Mobility",
+        "duration_min": duration_min,
+        "coach_notes": "Downshift the room. Finish with breathing and posture.",
+        "items": [
+            make_round_item(
+                title=drill["name"],
+                details=drill["explanation"],
+                coach_cues=drill.get("coaching_notes", ""),
+                explanation=drill["explanation"],
+                athlete_desc=drill.get("athlete_description", ""),
+                rounds=1,
+                round_length_sec=max(180, duration_min * 60),
+                rest_sec=0,
+            )
+        ],
+    }
+
+
+# =========================================================
+# FULL WORKOUT GENERATION
+# =========================================================
+
+def generate_full_workout(
+    name: str,
+    class_type: str,
+    level: str,
+    training_goal: str,
+    intensity: str,
+    coach: str,
+    total_duration: int,
+    format_name: str,
+    custom_split: Dict[str, int],
+    equipment_available: List[str],
+    constraints: Dict[str, Any],
+    rounds: int,
+    round_length_sec: int,
+    rest_sec: int,
+    tags: List[str],
+) -> Dict[str, Any]:
+    """
+    Generate a full structured BWB workout.
+    """
+    durations = section_duration_map(format_name, total_duration, custom_split)
+    sections: List[Dict[str, Any]] = []
+
+    sections.append(
+        generate_warmup_section(
+            level,
+            training_goal,
+            durations.get("warmup", 10),
+            equipment_available,
+            constraints,
+        )
+    )
+
+    sections.append(
+        generate_partner_section(
+            level,
+            training_goal,
+            durations.get("partner", 10),
+            equipment_available,
+            constraints,
+            rounds,
+            round_length_sec,
+            rest_sec,
+        )
+    )
+
+    sections.append(
+        generate_bag_section(
+            level,
+            training_goal,
+            durations.get("bag", 10),
+            equipment_available,
+            constraints,
+            rounds,
+            round_length_sec,
+            rest_sec,
+        )
+    )
+
+    if durations.get("strength_or_core", 0) > 0:
+        sections.append(
+            generate_strength_section(
+                level,
+                training_goal,
+                durations.get("strength_or_core", 10),
+                equipment_available,
+                constraints,
+                intensity,
+            )
+        )
+
+    if durations.get("cardio", 0) > 0:
+        sections.append(
+            generate_cardio_section(
+                level,
+                training_goal,
+                durations.get("cardio", 10),
+                equipment_available,
+                constraints,
+                intensity,
+            )
+        )
+
+    sections.append(
+        generate_cooldown_section(
+            level,
+            durations.get("cooldown", 5),
+            equipment_available,
+            constraints,
+        )
+    )
+
+    workout = {
+        "name": clean_text(name) or f"{training_goal} {level.title()} Session",
+        "class_type": class_type,
+        "level": level,
+        "training_goal": training_goal,
+        "intensity": intensity,
+        "coach": coach,
+        "tags": tags,
+        "format_name": format_name,
+        "total_duration": total_duration,
+        "equipment_available": equipment_available,
+        "constraints": constraints,
+        "rounds": rounds,
+        "round_length_sec": round_length_sec,
+        "rest_sec": rest_sec,
+        "sections": sections,
+        "created_at": now_iso(),
+    }
+
+    return workout
+
+
+def regenerate_section(workout: Dict[str, Any], section_name: str) -> Dict[str, Any]:
+    """
+    Regenerate only one section of an existing workout.
+    """
+    workout = json.loads(json.dumps(workout))
+
+    level = workout["level"]
+    goal = workout["training_goal"]
+    equipment = workout["equipment_available"]
+    constraints = workout["constraints"]
+    rounds = workout["rounds"]
+    round_length_sec = workout["round_length_sec"]
+    rest_sec = workout["rest_sec"]
+    intensity = workout["intensity"]
+
+    duration_lookup = {s["name"]: s["duration_min"] for s in workout["sections"]}
+
+    new_section = None
+
+    if section_name == "Warm-Up":
+        new_section = generate_warmup_section(
+            level, goal, duration_lookup.get("Warm-Up", 10), equipment, constraints
+        )
+
+    elif section_name == "Partner Drills":
+        new_section = generate_partner_section(
+            level,
+            goal,
+            duration_lookup.get("Partner Drills", 10),
+            equipment,
+            constraints,
+            rounds,
+            round_length_sec,
+            rest_sec,
+        )
+
+    elif section_name == "Heavy Bag":
+        new_section = generate_bag_section(
+            level,
+            goal,
+            duration_lookup.get("Heavy Bag", 10),
+            equipment,
+            constraints,
+            rounds,
+            round_length_sec,
+            rest_sec,
+        )
+
+    elif section_name == "Strength / Core":
+        new_section = generate_strength_section(
+            level,
+            goal,
+            duration_lookup.get("Strength / Core", 10),
+            equipment,
+            constraints,
+            intensity,
+        )
+
+    elif section_name == "Cardio / Conditioning":
+        new_section = generate_cardio_section(
+            level,
+            goal,
+            duration_lookup.get("Cardio / Conditioning", 10),
+            equipment,
+            constraints,
+            intensity,
+        )
+
+    elif section_name == "Cooldown / Mobility":
+        new_section = generate_cooldown_section(
+            level,
+            duration_lookup.get("Cooldown / Mobility", 5),
+            equipment,
+            constraints,
+        )
+
+    if new_section:
+        updated_sections: List[Dict[str, Any]] = []
+        for section in workout["sections"]:
+            if section["name"] == section_name:
+                updated_sections.append(new_section)
+            else:
+                updated_sections.append(section)
+        workout["sections"] = updated_sections
+
+    return workout
+
+# =========================================================
+# PERSISTENCE / CRUD HELPERS
+# =========================================================
+
+def create_workout_record(
+    workout: Dict[str, Any],
+    status: str = "draft",
+    favorite: bool = False,
+) -> int:
+    """
+    Create a new workout record and audit the creation.
+    Returns the inserted workout ID.
+    """
+    run(
+        """
+        INSERT INTO workouts (
+            name, class_type, level, training_goal, intensity, coach,
+            tags, status, is_favorite, payload_json, version,
+            parent_workout_id, created_at, updated_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            workout["name"],
+            workout["class_type"],
+            workout["level"],
+            workout["training_goal"],
+            workout["intensity"],
+            workout.get("coach", ""),
+            ",".join(workout.get("tags", [])),
+            status,
+            1 if favorite else 0,
+            dump_json(workout),
+            1,
+            None,
+            now_iso(),
+            now_iso(),
+        ),
+    )
+    row = fetch_one("SELECT last_insert_rowid() AS id")
+    workout_id = row["id"]
+
+    current_user = get_current_user()
+    actor = current_user["username"] if current_user else "system"
+    log_audit("workout", workout_id, "create", workout, actor)
+
+    return workout_id
+
+
+def update_workout_record(
+    workout_id: int,
+    workout: Dict[str, Any],
+    status: str,
+    favorite: bool,
+) -> None:
+    """
+    Update an existing workout record and increment its version.
+    """
+    current = fetch_one("SELECT * FROM workouts WHERE id = ?", (workout_id,))
+    if current is None:
+        raise ValueError(f"Workout {workout_id} does not exist.")
+
+    current_payload = load_json(current["payload_json"], {})
+    new_version = int(current["version"]) + 1
+
+    run(
+        """
+        UPDATE workouts
+        SET name = ?, class_type = ?, level = ?, training_goal = ?, intensity = ?,
+            coach = ?, tags = ?, status = ?, is_favorite = ?, payload_json = ?,
+            version = ?, updated_at = ?
+        WHERE id = ?
+        """,
+        (
+            workout["name"],
+            workout["class_type"],
+            workout["level"],
+            workout["training_goal"],
+            workout["intensity"],
+            workout.get("coach", ""),
+            ",".join(workout.get("tags", [])),
+            status,
+            1 if favorite else 0,
+            dump_json(workout),
+            new_version,
+            now_iso(),
+            workout_id,
+        ),
+    )
+
+    current_user = get_current_user()
+    actor = current_user["username"] if current_user else "system"
+    log_audit(
+        "workout",
+        workout_id,
+        "update",
+        {"before": current_payload, "after": workout},
+        actor,
+    )
+
+
+def delete_workout_record(workout_id: int) -> None:
+    """
+    Delete a workout record and audit the deletion.
+    """
+    current = fetch_one("SELECT * FROM workouts WHERE id = ?", (workout_id,))
+    if current is None:
+        return
+
+    payload = load_json(current["payload_json"], {})
+    run("DELETE FROM workouts WHERE id = ?", (workout_id,))
+
+    current_user = get_current_user()
+    actor = current_user["username"] if current_user else "system"
+    log_audit("workout", workout_id, "delete", {"deleted": payload}, actor)
+
+
+def get_workout_by_id(workout_id: int) -> Optional[sqlite3.Row]:
+    """Fetch a single workout row."""
+    return fetch_one("SELECT * FROM workouts WHERE id = ?", (workout_id,))
+
+
+def get_workouts_filtered(
+    search: str = "",
+    coach_filter: str = "",
+    class_type: str = "",
+    level: str = "",
+    tag_filter: str = "",
+    status_filter: str = "",
+    favorites_only: bool = False,
+) -> List[sqlite3.Row]:
+    """
+    Filter workouts in Python for flexible UI querying.
+    """
+    rows = fetch_all("SELECT * FROM workouts ORDER BY updated_at DESC")
+    out: List[sqlite3.Row] = []
+    search = search.lower().strip()
+
+    for r in rows:
+        if favorites_only and not r["is_favorite"]:
+            continue
+        if coach_filter and coach_filter != r["coach"]:
+            continue
+        if class_type and class_type != r["class_type"]:
+            continue
+        if level and level != r["level"]:
+            continue
+        if status_filter and status_filter != r["status"]:
+            continue
+        if tag_filter and tag_filter.lower() not in (r["tags"] or "").lower():
+            continue
+
+        blob = f"{r['name']} {(r['tags'] or '')} {r['training_goal']} {r['level']}".lower()
+        if search and search not in blob:
+            continue
+
+        out.append(r)
+
+    return out
+
+
+def toggle_workout_favorite(workout_id: int) -> None:
+    """
+    Toggle favorite flag for a workout.
+    """
+    row = get_workout_by_id(workout_id)
+    if row is None:
+        raise ValueError(f"Workout {workout_id} does not exist.")
+
+    new_value = 0 if row["is_favorite"] else 1
+    run(
+        "UPDATE workouts SET is_favorite = ?, updated_at = ? WHERE id = ?",
+        (new_value, now_iso(), workout_id),
+    )
+
+    current_user = get_current_user()
+    actor = current_user["username"] if current_user else "system"
+    log_audit(
+        "workout",
+        workout_id,
+        "toggle_favorite",
+        {"is_favorite": bool(new_value)},
+        actor,
+    )
+
+
+# =========================================================
+# TEMPLATE CRUD
+# =========================================================
+
+def create_template(
+    name: str,
+    template_type: str,
+    description: str,
+    tags: List[str],
+    payload: Dict[str, Any],
+) -> int:
+    """
+    Create a template record and audit it.
+    """
+    run(
+        """
+        INSERT INTO templates (
+            name, template_type, description, tags, payload_json,
+            is_archived, created_by, created_at, updated_at
+        )
+        VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?)
+        """,
+        (
+            name,
+            template_type,
+            description,
+            ",".join(tags),
+            dump_json(payload),
+            get_current_user()["username"] if get_current_user() else "system",
+            now_iso(),
+            now_iso(),
+        ),
+    )
+
+    row = fetch_one("SELECT last_insert_rowid() AS id")
+    template_id = row["id"]
+
+    current_user = get_current_user()
+    actor = current_user["username"] if current_user else "system"
+    log_audit("template", template_id, "create", payload, actor)
+
+    return template_id
+
+
+def duplicate_template(template_id: int, new_name: Optional[str] = None) -> int:
+    """
+    Duplicate an existing template and return the new ID.
+    """
+    row = fetch_one("SELECT * FROM templates WHERE id = ?", (template_id,))
+    if row is None:
+        raise ValueError(f"Template {template_id} does not exist.")
+
+    payload = load_json(row["payload_json"], {})
+    new_template_name = new_name or f"{row['name']} Copy"
+
+    return create_template(
+        name=new_template_name,
+        template_type=row["template_type"],
+        description=row["description"] or "",
+        tags=parse_tags(row["tags"] or ""),
+        payload=payload,
+    )
+
+
+def archive_template(template_id: int) -> None:
+    """
+    Soft-archive a template.
+    """
+    row = fetch_one("SELECT * FROM templates WHERE id = ?", (template_id,))
+    if row is None:
+        return
+
+    run(
+        "UPDATE templates SET is_archived = 1, updated_at = ? WHERE id = ?",
+        (now_iso(), template_id),
+    )
+
+    current_user = get_current_user()
+    actor = current_user["username"] if current_user else "system"
+    log_audit("template", template_id, "archive", {"archived": True}, actor)
+
+
+def get_templates(include_archived: bool = False) -> List[sqlite3.Row]:
+    """
+    List templates ordered by most recently updated.
+    """
+    if include_archived:
+        return fetch_all("SELECT * FROM templates ORDER BY updated_at DESC")
+    return fetch_all(
+        "SELECT * FROM templates WHERE is_archived = 0 ORDER BY updated_at DESC"
+    )
+
+
+def get_template_by_id(template_id: int) -> Optional[sqlite3.Row]:
+    """Fetch a single template."""
+    return fetch_one("SELECT * FROM templates WHERE id = ?", (template_id,))
+
+
+# =========================================================
+# PROGRAM CRUD
+# =========================================================
+
+def create_program_record(
+    name: str,
+    weeks: int,
+    level: str,
+    goal_priority: str,
+    tags: List[str],
+    payload: Dict[str, Any],
+) -> int:
+    """
+    Create a program record and audit it.
+    """
+    run(
+        """
+        INSERT INTO programs (
+            name, weeks, level, goal_priority, tags, is_archived,
+            payload_json, created_by, created_at, updated_at
+        )
+        VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?, ?)
+        """,
+        (
+            name,
+            weeks,
+            level,
+            goal_priority,
+            ",".join(tags),
+            dump_json(payload),
+            get_current_user()["username"] if get_current_user() else "system",
+            now_iso(),
+            now_iso(),
+        ),
+    )
+
+    row = fetch_one("SELECT last_insert_rowid() AS id")
+    program_id = row["id"]
+
+    current_user = get_current_user()
+    actor = current_user["username"] if current_user else "system"
+    log_audit("program", program_id, "create", payload, actor)
+
+    return program_id
+
+
+def archive_program(program_id: int) -> None:
+    """
+    Soft-archive a program.
+    """
+    row = fetch_one("SELECT * FROM programs WHERE id = ?", (program_id,))
+    if row is None:
+        return
+
+    run(
+        "UPDATE programs SET is_archived = 1, updated_at = ? WHERE id = ?",
+        (now_iso(), program_id),
+    )
+
+    current_user = get_current_user()
+    actor = current_user["username"] if current_user else "system"
+    log_audit("program", program_id, "archive", {"archived": True}, actor)
+
+
+def get_programs(include_archived: bool = False) -> List[sqlite3.Row]:
+    """
+    List program rows ordered by most recently updated.
+    """
+    if include_archived:
+        return fetch_all("SELECT * FROM programs ORDER BY updated_at DESC")
+    return fetch_all(
+        "SELECT * FROM programs WHERE is_archived = 0 ORDER BY updated_at DESC"
+    )
+
+
+def get_program_by_id(program_id: int) -> Optional[sqlite3.Row]:
+    """Fetch a single program."""
+    return fetch_one("SELECT * FROM programs WHERE id = ?", (program_id,))
+
+
+# =========================================================
+# WHITEBOARD CRUD
+# =========================================================
+
+def save_uploaded_file(uploaded_file) -> str:
+    """
+    Save an uploaded Streamlit file to disk and return its path.
+    """
+    ext = os.path.splitext(uploaded_file.name)[1].lower()
+    file_name = f"{uuid.uuid4().hex}{ext}"
+    file_path = os.path.join(UPLOAD_DIR, file_name)
+
+    with open(file_path, "wb") as f:
+        f.write(uploaded_file.getbuffer())
+
+    return file_path
+
+
+def create_whiteboard_record(
+    title: str,
+    uploaded_file,
+    notes: str = "",
+    tags: str = "",
+    linked_workout_id: Optional[int] = None,
+    linked_program_id: Optional[int] = None,
+    coach: str = "",
+) -> int:
+    """
+    Save a whiteboard image and persist its metadata.
+    """
+    file_path = save_uploaded_file(uploaded_file)
+
+    run(
+        """
+        INSERT INTO whiteboards (
+            title, file_path, notes, tags, linked_workout_id,
+            linked_program_id, coach, created_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            title,
+            file_path,
+            notes,
+            tags,
+            linked_workout_id,
+            linked_program_id,
+            coach,
+            now_iso(),
+        ),
+    )
+
+    row = fetch_one("SELECT last_insert_rowid() AS id")
+    whiteboard_id = row["id"]
+
+    current_user = get_current_user()
+    actor = current_user["username"] if current_user else "system"
+    log_audit(
+        "whiteboard",
+        whiteboard_id,
+        "create",
+        {
+            "title": title,
+            "file_path": file_path,
+            "notes": notes,
+            "tags": tags,
+            "linked_workout_id": linked_workout_id,
+            "linked_program_id": linked_program_id,
+            "coach": coach,
+        },
+        actor,
+    )
+
+    return whiteboard_id
+
+
+def get_whiteboards() -> List[sqlite3.Row]:
+    """
+    Return all whiteboards ordered newest first.
+    """
+    return fetch_all("SELECT * FROM whiteboards ORDER BY created_at DESC")
+
+
+def get_whiteboard_by_id(whiteboard_id: int) -> Optional[sqlite3.Row]:
+    """Fetch a single whiteboard."""
+    return fetch_one("SELECT * FROM whiteboards WHERE id = ?", (whiteboard_id,))
+
+
+def delete_whiteboard_record(whiteboard_id: int) -> None:
+    """
+    Delete a whiteboard record and remove its file if present.
+    """
+    row = get_whiteboard_by_id(whiteboard_id)
+    if row is None:
+        return
+
+    payload = dict(row)
+
+    try:
+        if row["file_path"] and os.path.exists(row["file_path"]):
+            os.remove(row["file_path"])
+    except Exception:
+        pass
+
+    run("DELETE FROM whiteboards WHERE id = ?", (whiteboard_id,))
+
+    current_user = get_current_user()
+    actor = current_user["username"] if current_user else "system"
+    log_audit("whiteboard", whiteboard_id, "delete", {"deleted": payload}, actor)
+
+
+# =========================================================
+# AUDIT HELPERS
+# =========================================================
+
+def get_audit_entries(
+    entity_type: Optional[str] = None,
+    entity_id: Optional[int] = None,
+    limit: int = 50,
+) -> List[sqlite3.Row]:
+    """
+    Fetch audit entries optionally filtered by entity type / entity id.
+    """
+    query = "SELECT * FROM audit_log"
+    params: List[Any] = []
+    clauses: List[str] = []
+
+    if entity_type:
+        clauses.append("entity_type = ?")
+        params.append(entity_type)
+
+    if entity_id is not None:
+        clauses.append("entity_id = ?")
+        params.append(entity_id)
+
+    if clauses:
+        query += " WHERE " + " AND ".join(clauses)
+
+    query += " ORDER BY created_at DESC LIMIT ?"
+    params.append(limit)
+
+    return fetch_all(query, tuple(params))
+
+
+# =========================================================
+# EXPORT HELPERS
+# =========================================================
+
+def export_workout_txt(workout: Dict[str, Any]) -> bytes:
+    """
+    Export a workout as plain text.
+    """
+    lines: List[str] = []
+    lines.append(f"Workout: {workout.get('name', 'Unnamed')}")
+    lines.append(f"Class Type: {workout.get('class_type', '')}")
+    lines.append(f"Level: {workout.get('level', '')}")
+    lines.append(f"Goal: {workout.get('training_goal', '')}")
+    lines.append(f"Intensity: {workout.get('intensity', '')}")
+    lines.append("")
+
+    for section in workout.get("sections", []):
+        lines.append(f"## {section['name']} ({section['duration_min']} min)")
+        lines.append(section.get("coach_notes", ""))
+
+        for idx, item in enumerate(section.get("items", []), start=1):
+            lines.append(f"{idx}. {item.get('title', '')}")
+
+            if item.get("details"):
+                lines.append(f"   Details: {item['details']}")
+
+            if item.get("coach_cues"):
+                lines.append(f"   Coach Cues: {item['coach_cues']}")
+
+        lines.append("")
+
+    return "\n".join(lines).encode("utf-8")
+
+
+def export_json_bytes(payload: Dict[str, Any]) -> bytes:
+    """
+    Export any payload as JSON bytes.
+    """
+    return dump_json(payload).encode("utf-8")
+
+
+def export_workout_pdf(workout: Dict[str, Any]) -> bytes:
+    """
+    Export a workout as PDF if reportlab is available.
+    """
+    if not PDF_EXPORT_AVAILABLE:
+        raise RuntimeError("PDF export is unavailable because reportlab is not installed.")
+
+    buffer = io.BytesIO()
+    c = canvas.Canvas(buffer, pagesize=letter)
+    _, height = letter
+    y = height - 40
+
+    def line(text: str, size: int = 10, gap: int = 14) -> None:
+        nonlocal y
+        c.setFont("Helvetica", size)
+
+        max_chars = 100
+        wrapped = [text[i:i + max_chars] for i in range(0, len(text), max_chars)] or [""]
+
+        for w in wrapped:
+            if y < 60:
+                c.showPage()
+                y = height - 40
+                c.setFont("Helvetica", size)
+            c.drawString(40, y, w)
+            y -= gap
+
+    line(workout.get("name", "Workout"), size=14, gap=18)
+    line(
+        f"Type: {workout.get('class_type', '')} | "
+        f"Level: {workout.get('level', '')} | "
+        f"Goal: {workout.get('training_goal', '')} | "
+        f"Intensity: {workout.get('intensity', '')}",
+        size=10,
+        gap=14,
+    )
+    line(" ", gap=8)
+
+    for section in workout.get("sections", []):
+        line(f"{section.get('name', 'Section')} ({section.get('duration_min', 0)} min)", size=12, gap=16)
+
+        if section.get("coach_notes"):
+            line(f"Notes: {section['coach_notes']}", size=9, gap=12)
+
+        for item in section.get("items", []):
+            line(f"- {item.get('title', '')}", size=10, gap=12)
+
+            if item.get("details"):
+                line(f"  {item['details']}", size=9, gap=11)
+
+            if item.get("coach_cues"):
+                line(f"  Coach cues: {item['coach_cues']}", size=9, gap=11)
+
+        line(" ", gap=8)
+
+    c.save()
+    pdf = buffer.getvalue()
+    buffer.close()
+    return pdf
+
+# =========================================================
+# WORKOUT UI HELPERS
+# =========================================================
+
+def render_workout_preview(workout: Dict[str, Any], mobile: bool = False) -> None:
+    """
+    Render a workout in preview format.
+    """
+    st.markdown('<div class="bwb-card">', unsafe_allow_html=True)
+    st.subheader(workout.get("name", "Workout"))
+
+    meta = [
+        f"Type: {workout.get('class_type', '')}",
+        f"Level: {workout.get('level', '')}",
+        f"Goal: {workout.get('training_goal', '')}",
+        f"Intensity: {workout.get('intensity', '')}",
+        f"Coach: {workout.get('coach', '')}",
+    ]
+    st.caption(" | ".join(meta))
+
+    if workout.get("tags"):
+        st.markdown(list_to_pills(workout["tags"]), unsafe_allow_html=True)
+
+    for section in workout.get("sections", []):
+        if mobile:
+            st.markdown(f"### {section['name']} · {section['duration_min']} min")
+            for item in section.get("items", []):
+                st.write(f"**{item['title']}**")
+                if item.get("details"):
+                    st.write(item["details"])
+        else:
+            with st.expander(f"{section['name']} · {section['duration_min']} min", expanded=True):
+                st.caption(section.get("coach_notes", ""))
+
+                for item in section.get("items", []):
+                    st.write(f"**{item['title']}**")
+
+                    if item.get("details"):
+                        st.write(item["details"])
+
+                    small = []
+                    if item.get("rounds"):
+                        small.append(f"Rounds: {item['rounds']}")
+                    if item.get("round_length_sec"):
+                        small.append(f"Round Length: {seconds_to_label(item['round_length_sec'])}")
+                    if item.get("rest_sec"):
+                        small.append(f"Rest: {seconds_to_label(item['rest_sec'])}")
+
+                    if small:
+                        st.caption(" | ".join(small))
+
+                    if item.get("coach_cues"):
+                        st.write(f"_Coach cues:_ {item['coach_cues']}")
+
+    st.markdown("</div>", unsafe_allow_html=True)
+
+
+def render_workout_editor(workout_key: str) -> Optional[Dict[str, Any]]:
+    """
+    Render the editable workout UI for a workout stored in session state.
+    """
+    workout = st.session_state.get(workout_key)
+    if not workout:
+        return None
+
+    st.subheader("Workout Editor")
+
+    workout["name"] = st.text_input(
+        "Workout Name",
+        value=workout.get("name", ""),
+        key=f"{workout_key}_name",
+    )
+
+    workout["coach"] = st.text_input(
+        "Coach",
+        value=workout.get("coach", ""),
+        key=f"{workout_key}_coach",
+    )
+
+    workout["tags"] = parse_tags(
+        st.text_input(
+            "Tags (comma-separated)",
+            value=",".join(workout.get("tags", [])),
+            key=f"{workout_key}_tags",
+        )
+    )
+
+    for idx, section in enumerate(workout["sections"]):
+        with st.expander(f"{section['name']} · {section['duration_min']} min", expanded=True):
+            c1, c2 = st.columns([3, 1])
+
+            with c1:
+                section["coach_notes"] = st.text_area(
+                    "Coach Notes",
+                    value=section.get("coach_notes", ""),
+                    key=f"{workout_key}_section_notes_{idx}",
+                    height=90,
+                )
+
+            with c2:
+                if st.button("Regenerate Section", key=f"{workout_key}_regen_{idx}"):
+                    st.session_state[workout_key] = regenerate_section(workout, section["name"])
+                    st.rerun()
+
+            for item_idx, item in enumerate(section.get("items", [])):
+                st.markdown('<div class="bwb-divider"></div>', unsafe_allow_html=True)
+
+                item["title"] = st.text_input(
+                    f"Item {item_idx + 1} Title",
+                    value=item.get("title", ""),
+                    key=f"{workout_key}_{idx}_{item_idx}_title",
+                )
+
+                item["details"] = st.text_area(
+                    "Details",
+                    value=item.get("details", ""),
+                    key=f"{workout_key}_{idx}_{item_idx}_details",
+                    height=80,
+                )
+
+                col_a, col_b, col_c = st.columns(3)
+
+                with col_a:
+                    item["rounds"] = st.number_input(
+                        "Rounds",
+                        min_value=0,
+                        value=to_int(item.get("rounds", 0)),
+                        key=f"{workout_key}_{idx}_{item_idx}_rounds",
+                    )
+
+                with col_b:
+                    item["round_length_sec"] = st.number_input(
+                        "Round Length (sec)",
+                        min_value=0,
+                        value=to_int(item.get("round_length_sec", 0)),
+                        key=f"{workout_key}_{idx}_{item_idx}_round_len",
+                    )
+
+                with col_c:
+                    item["rest_sec"] = st.number_input(
+                        "Rest (sec)",
+                        min_value=0,
+                        value=to_int(item.get("rest_sec", 0)),
+                        key=f"{workout_key}_{idx}_{item_idx}_rest",
+                    )
+
+                item["coach_cues"] = st.text_area(
+                    "Coach Cues",
+                    value=item.get("coach_cues", ""),
+                    key=f"{workout_key}_{idx}_{item_idx}_cues",
+                    height=70,
+                )
+
+                item["athlete_description"] = st.text_area(
+                    "Athlete-Friendly Description",
+                    value=item.get("athlete_description", ""),
+                    key=f"{workout_key}_{idx}_{item_idx}_athlete",
+                    height=70,
+                )
+
+                item["explanation"] = st.text_area(
+                    "Why This Is In The Class",
+                    value=item.get("explanation", ""),
+                    key=f"{workout_key}_{idx}_{item_idx}_why",
+                    height=70,
+                )
+
+    st.session_state[workout_key] = workout
+    return workout
+
+
+# =========================================================
+# PAGE: DASHBOARD
+# =========================================================
+
+def render_dashboard_page() -> None:
+    """
+    Render the real dashboard page.
+    """
+    require_permission("view_dashboard")
+
+    st.title("Dashboard")
+
+    workout_count = fetch_one("SELECT COUNT(*) AS c FROM workouts")["c"]
+    drill_count = fetch_one("SELECT COUNT(*) AS c FROM drills WHERE is_archived = 0")["c"]
+    program_count = fetch_one("SELECT COUNT(*) AS c FROM programs WHERE is_archived = 0")["c"]
+    whiteboard_count = fetch_one("SELECT COUNT(*) AS c FROM whiteboards")["c"]
+
+    c1, c2, c3, c4 = st.columns(4)
+    with c1:
+        metric_card("Saved Workouts", workout_count, "All draft + completed sessions")
+    with c2:
+        metric_card("Active Drills", drill_count, "Library items available to coaches")
+    with c3:
+        metric_card("Programs", program_count, "Saved multi-week plans")
+    with c4:
+        metric_card("Whiteboards", whiteboard_count, "Archived session photos")
+
+    st.markdown("### Recent Activity")
+    recent = get_audit_entries(limit=12)
+    if not recent:
+        st.info("No activity yet.")
+    else:
+        for row in recent:
+            st.markdown(
+                f"""
+                <div class="bwb-card">
+                    <b>{row['action'].title()}</b> · {row['entity_type']} #{row['entity_id']}<br>
+                    <span class="bwb-subtle">By {row['actor']} at {row['created_at']}</span>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+    st.markdown("### Quick Coach Notes")
+    st.write(
+        "Use **Generate Class** for daily sessions. "
+        "Later pages will cover saved workouts, templates, programs, whiteboards, and imports."
+    )
+
+
+# =========================================================
+# PAGE: GENERATE CLASS
+# =========================================================
+
+def render_generate_class_page() -> None:
+    """
+    Render the Generate Class page using the existing generator + persistence layer.
+    """
+    require_permission("generate")
+
+    st.title("Generate Class")
+
+    with st.form("generate_class_form"):
+        left, right = st.columns(2)
+
+        with left:
+            name = st.text_input(
+                "Session Name",
+                value=f"{datetime.now().strftime('%b %d')} BWB Session",
+            )
+
+            class_type = st.selectbox(
+                "Class Type",
+                [
+                    "boxing",
+                    "boxing + strength",
+                    "boxing + cardio",
+                    "strength-only",
+                    "cardio-only",
+                    "mixed class",
+                ],
+            )
+
+            level = st.selectbox(
+                "Level",
+                ["beginner", "intermediate", "advanced", "fighter", "teen", "general fitness"],
+            )
+
+            training_goal = st.selectbox("Training Goal", TACTICAL_THEMES)
+
+            intensity = st.selectbox(
+                "Intensity",
+                [
+                    "technical",
+                    "moderate",
+                    "high intensity",
+                    "conditioning-focused",
+                    "recovery-focused",
+                ],
+            )
+
+            total_duration = st.selectbox("Total Duration (min)", [45, 50, 60, 75, 90], index=2)
+
+            format_name = st.selectbox(
+                "Format",
+                [
+                    "Standard 60 Boxing",
+                    "30 Boxing / 30 Strength",
+                    "30 Boxing / 30 Cardio",
+                    "40 Boxing / 20 Strength",
+                    "45 Boxing / 15 Conditioning",
+                    "20 / 20 / 20 Hybrid",
+                    "Custom",
+                ],
+            )
+
+        with right:
+            rounds = st.number_input(
+                "Default Boxing Rounds",
+                min_value=1,
+                max_value=10,
+                value=4,
+            )
+
+            round_length_sec = st.selectbox(
+                "Round Length",
+                [120, 150, 180],
+                index=2,
+                format_func=seconds_to_label,
+            )
+
+            rest_sec = st.selectbox(
+                "Rest Between Rounds",
+                [15, 20, 30, 45, 60],
+                index=3,
+            )
+
+            equipment_available = st.multiselect(
+                "Equipment Available",
+                [
+                    "bodyweight",
+                    "jump rope",
+                    "heavy bag",
+                    "dumbbells",
+                    "kettlebells",
+                    "medicine ball",
+                    "bands",
+                    "bench",
+                    "boxes",
+                    "sled",
+                    "cables",
+                ],
+                default=["bodyweight", "jump rope", "heavy bag", "dumbbells", "bands"],
+            )
+
+            st.markdown("**Constraints**")
+            limited_space = st.checkbox("Limited Space")
+            no_partner_drills = st.checkbox("No Partner Drills")
+            no_bags = st.checkbox("No Bags")
+            low_impact_only = st.checkbox("Low Impact Only")
+            bodyweight_only_strength = st.checkbox("Bodyweight-Only Strength")
+            beginner_safe_only = st.checkbox("Beginner-Safe Only")
+            mixed_level = st.checkbox("Mixed-Level Class")
+
+        custom_split: Dict[str, int] = {}
+        if format_name == "Custom":
+            st.markdown("### Custom Split")
+            a, b, c_, d, e, f = st.columns(6)
+
+            with a:
+                custom_split["warmup"] = st.number_input("Warmup", min_value=0, value=10)
+            with b:
+                custom_split["partner"] = st.number_input("Partner", min_value=0, value=10)
+            with c_:
+                custom_split["bag"] = st.number_input("Bag", min_value=0, value=10)
+            with d:
+                custom_split["strength_or_core"] = st.number_input("Strength/Core", min_value=0, value=10)
+            with e:
+                custom_split["cardio"] = st.number_input("Cardio", min_value=0, value=10)
+            with f:
+                custom_split["cooldown"] = st.number_input("Cooldown", min_value=0, value=5)
+
+        tags_raw = st.text_input("Tags (comma-separated)", value=f"{level},{training_goal}")
+
+        submitted = st.form_submit_button("Generate Class", use_container_width=True)
+
+    if submitted:
+        constraints = build_constraints_dict(
+            limited_space=limited_space,
+            no_partner_drills=no_partner_drills,
+            no_bags=no_bags,
+            low_impact_only=low_impact_only,
+            bodyweight_only_strength=bodyweight_only_strength,
+            beginner_safe_only=beginner_safe_only,
+            mixed_level=mixed_level,
+        )
+
+        current_user = get_current_user()
+
+        workout = generate_full_workout(
+            name=name,
+            class_type=class_type,
+            level=level,
+            training_goal=training_goal,
+            intensity=intensity,
+            coach=current_user["display_name"] if current_user else "",
+            total_duration=total_duration,
+            format_name=format_name,
+            custom_split=custom_split,
+            equipment_available=equipment_available,
+            constraints=constraints,
+            rounds=rounds,
+            round_length_sec=round_length_sec,
+            rest_sec=rest_sec,
+            tags=parse_tags(tags_raw),
+        )
+
+        st.session_state["current_workout"] = workout
+        st.success("Workout generated.")
+
+    current_workout = render_workout_editor("current_workout")
+
+    if current_workout:
+        st.markdown("### Preview")
+        render_workout_preview(current_workout)
+
+        c1, c2, c3, c4 = st.columns(4)
+
+        with c1:
+            if st.button("Save as Draft", use_container_width=True):
+                workout_id = create_workout_record(
+                    current_workout,
+                    status="draft",
+                    favorite=False,
+                )
+                st.success(f"Saved draft workout #{workout_id}.")
+
+        with c2:
+            if st.button("Save as Completed Class", use_container_width=True):
+                workout_id = create_workout_record(
+                    current_workout,
+                    status="completed",
+                    favorite=False,
+                )
+                st.success(f"Saved completed workout #{workout_id}.")
+
+        with c3:
+            if st.button("Save as Favorite", use_container_width=True):
+                workout_id = create_workout_record(
+                    current_workout,
+                    status="draft",
+                    favorite=True,
+                )
+                st.success(f"Saved favorite workout #{workout_id}.")
+
+        with c4:
+            if st.button("Save as Template", use_container_width=True):
+                template_id = create_template(
+                    name=current_workout["name"],
+                    template_type="workout",
+                    description="Saved from generator",
+                    tags=current_workout.get("tags", []),
+                    payload=current_workout,
+                )
+                st.success(f"Template #{template_id} saved.")
+
+        export_col1, export_col2, export_col3 = st.columns(3)
+
+        with export_col1:
+            st.download_button(
+                "Download JSON",
+                data=export_json_bytes(current_workout),
+                file_name=f"{clean_text(current_workout['name']).replace(' ', '_')}.json",
+                mime="application/json",
+                use_container_width=True,
+            )
+
+        with export_col2:
+            st.download_button(
+                "Download TXT",
+                data=export_workout_txt(current_workout),
+                file_name=f"{clean_text(current_workout['name']).replace(' ', '_')}.txt",
+                mime="text/plain",
+                use_container_width=True,
+            )
+
+        with export_col3:
+            if PDF_EXPORT_AVAILABLE:
+                st.download_button(
+                    "Download PDF",
+                    data=export_workout_pdf(current_workout),
+                    file_name=f"{clean_text(current_workout['name']).replace(' ', '_')}.pdf",
+                    mime="application/pdf",
+                    use_container_width=True,
+                )
+            else:
+                st.info("PDF export unavailable: add `reportlab` to requirements.txt")
+
+
+# =========================================================
+# NAVIGATION ROUTER (REAL PAGES SO FAR)
+# =========================================================
+
+nav = render_top_shell()
+
+if nav == "Dashboard":
+    render_dashboard_page()
+
+elif nav == "Generate Class":
+    render_generate_class_page()
+
+elif nav == "Generate Program":
+    require_permission("generate")
+    render_placeholder_page(
+        "Generate Program",
+        "Program generation UI will be added in the next phase."
+    )
+
+elif nav == "Drill Library":
+    render_placeholder_page(
+        "Drill Library",
+        "Drill library CRUD UI will be added in the next phase."
+    )
+
+elif nav == "Saved Workouts":
+    render_placeholder_page(
+        "Saved Workouts",
+        "Saved workout browsing and editing will be added in the next phase."
+    )
+
+elif nav == "Templates":
+    render_placeholder_page(
+        "Templates",
+        "Template management UI will be added in a later phase."
+    )
+
+elif nav == "Whiteboard Archive":
+    if has_perm("whiteboard"):
+        render_placeholder_page(
+            "Whiteboard Archive",
+            "Whiteboard archive UI will be added in a later phase."
+        )
+    else:
+        st.error("You do not have permission to access Whiteboard Archive.")
+
+elif nav == "Import Content":
+    if has_perm("import"):
+        render_placeholder_page(
+            "Import Content",
+            "Bulk import UI will be added in a later phase."
+        )
+    else:
+        st.error("You do not have permission to access Import Content.")
+
+elif nav == "Settings":
+    render_placeholder_page(
+        "Settings",
+        "Settings UI will be added in a later phase."
+    )
+
