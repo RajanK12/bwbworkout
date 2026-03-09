@@ -3578,31 +3578,13 @@ elif nav == "Saved Workouts":
     render_saved_workouts_page()
 
 elif nav == "Templates":
-    render_placeholder_page(
-        "Templates",
-        "Template management UI will be added in a later phase."
-    )
+    render_templates_page()
 
 elif nav == "Whiteboard Archive":
-    if has_perm("whiteboard"):
-        render_placeholder_page(
-            "Whiteboard Archive",
-            "Whiteboard archive UI will be added in a later phase."
-        )
-    else:
-        st.error("You do not have permission to access Whiteboard Archive.")
+    render_whiteboard_archive_page()
 
 elif nav == "Import Content":
-    if has_perm("import"):
-        render_placeholder_page(
-            "Import Content",
-            "Bulk import UI will be added in a later phase."
-        )
-    else:
-        st.error("You do not have permission to access Import Content.")
+    render_import_content_page()
 
 elif nav == "Settings":
-    render_placeholder_page(
-        "Settings",
-        "Settings UI will be added in a later phase."
-    )
+    render_settings_page()
