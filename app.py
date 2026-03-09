@@ -215,10 +215,6 @@ def dump_json(value: Any) -> str:
     """Safely dump JSON text."""
     return json.dumps(value, ensure_ascii=False, indent=2)
 
-def get_workout_by_id(workout_id: int) -> Optional[sqlite3.Row]:
-    """Fetch a single workout row."""
-    return fetch_one("SELECT * FROM workouts WHERE id = ?", (workout_id,))
-
 # =========================================================
 # SCHEMA CREATION
 # =========================================================
@@ -805,7 +801,6 @@ def render_top_shell() -> str:
 
     return render_sidebar_navigation()
 
-
 def render_placeholder_page(title: str, description: str) -> None:
     """Simple placeholder page renderer for pages not yet implemented."""
     st.title(title)
@@ -817,35 +812,6 @@ def render_placeholder_page(title: str, description: str) -> None:
         """,
         unsafe_allow_html=True,
     )
-
-
-def render_dashboard_shell() -> None:
-    """Minimal dashboard shell that works before core logic is added."""
-    require_permission("view_dashboard")
-
-    st.title("Dashboard")
-
-    c1, c2, c3, c4 = st.columns(4)
-    with c1:
-        metric_card("Saved Workouts", "—", "Workout logic added in later phase")
-    with c2:
-        metric_card("Active Drills", "—", "Drill queries added in later phase")
-    with c3:
-        metric_card("Programs", "—", "Program logic added in later phase")
-    with c4:
-        metric_card("Whiteboards", "—", "Whiteboard logic added in later phase")
-
-    st.markdown("### System Status")
-    st.success("Auth, permissions, sidebar shell, and DB foundation are loaded.")
-
-    st.markdown("### Current User")
-    current_user = get_current_user()
-    if current_user:
-        st.write(f"**Name:** {current_user['display_name']}")
-        st.write(f"**Username:** {current_user['username']}")
-        st.write(f"**Role:** {current_user['role']}")
-
-
 # =========================================================
 # BOXING LOGIC ENGINE
 # =========================================================
