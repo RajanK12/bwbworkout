@@ -215,6 +215,9 @@ def dump_json(value: Any) -> str:
     """Safely dump JSON text."""
     return json.dumps(value, ensure_ascii=False, indent=2)
 
+def get_workout_by_id(workout_id: int) -> Optional[sqlite3.Row]:
+    """Fetch a single workout row."""
+    return fetch_one("SELECT * FROM workouts WHERE id = ?", (workout_id,))
 
 # =========================================================
 # SCHEMA CREATION
@@ -3060,7 +3063,532 @@ def render_generate_class_page() -> None:
                 )
             else:
                 st.info("PDF export unavailable: add `reportlab` to requirements.txt")
+# =========================================================
+# PAGE: GENERATE PROGRAM
+# =========================================================
 
+def render_generate_program_page() -> None:
+    """
+    Render the Generate Program page using the existing generator + persistence layer.
+    """
+    require_permission("generate")
+
+    st.title("Generate Program")
+
+    with st.form("program_form"):
+        p1, p2, p3 = st.columns(3)
+
+        with p1:
+            program_name = st.text_input("Program Name", value="BWB 4-Week Block")
+            weeks = st.slider("Weeks", 2, 12, 4)
+            level = st.selectbox(
+                "Level",
+                ["beginner", "intermediate", "advanced", "fighter", "teen", "general fitness"],
+                key="program_level",
+            )
+
+        with p2:
+            priority = st.selectbox(
+                "Primary Priority",
+                [
+                    "skill accumulation",
+                    "conditioning progression",
+                    "technique variety",
+                    "balanced development",
+                ],
+            )
+            base_goal = st.selectbox("Base Technical Focus", TACTICAL_THEMES, key="program_base_goal")
+
+        with p3:
+            equipment_available = st.multiselect(
+                "Equipment Available",
+                [
+                    "bodyweight",
+                    "jump rope",
+                    "heavy bag",
+                    "dumbbells",
+                    "kettlebells",
+                    "medicine ball",
+                    "bands",
+                    "bench",
+                    "boxes",
+                    "sled",
+                    "cables",
+                ],
+                default=["bodyweight", "jump rope", "heavy bag", "dumbbells", "bands"],
+                key="program_equipment",
+            )
+            tags_raw = st.text_input("Tags", value=f"{level},{priority},{base_goal}")
+
+        gen_program = st.form_submit_button("Generate Program", use_container_width=True)
+
+    if gen_program:
+        program_sessions: List[Dict[str, Any]] = []
+
+        goal_cycle = {
+            "skill accumulation": [base_goal, "technique development", "defense", "angle work"],
+            "conditioning progression": [base_goal, "conditioning", "endurance", "cardio capacity"],
+            "technique variety": [base_goal, "counterpunching", "body punching", "movement quality"],
+            "balanced development": [base_goal, "conditioning", "power", "defense"],
+        }[priority]
+
+        current_user = get_current_user()
+        coach_name = current_user["display_name"] if current_user else ""
+
+        for wk in range(1, weeks + 1):
+            week_goal = goal_cycle[(wk - 1) % len(goal_cycle)]
+            week_intensity = "technical" if wk == 1 else ("moderate" if wk < weeks else "high intensity")
+
+            workout = generate_full_workout(
+                name=f"Week {wk} - {week_goal.title()}",
+                class_type="boxing" if week_goal not in {"boxing-specific strength", "cardio capacity"} else "mixed class",
+                level=level,
+                training_goal=week_goal,
+                intensity=week_intensity,
+                coach=coach_name,
+                total_duration=60,
+                format_name="Standard 60 Boxing",
+                custom_split={},
+                equipment_available=equipment_available,
+                constraints=build_constraints_dict(
+                    limited_space=False,
+                    no_partner_drills=False,
+                    no_bags=False,
+                    low_impact_only=False,
+                    bodyweight_only_strength=False,
+                    beginner_safe_only=(level == "beginner"),
+                    mixed_level=False,
+                ),
+                rounds=4 if wk < weeks else 5,
+                round_length_sec=180,
+                rest_sec=45 if wk < weeks else 30,
+                tags=parse_tags(tags_raw),
+            )
+
+            program_sessions.append(
+                {
+                    "week": wk,
+                    "theme": week_goal,
+                    "progression_note": (
+                        "Lower complexity opener."
+                        if wk == 1 else
+                        "Add pace or a defensive layer."
+                        if wk < weeks else
+                        "Peak execution under fatigue."
+                    ),
+                    "workout": workout,
+                }
+            )
+
+        program_payload = {
+            "name": program_name,
+            "weeks": weeks,
+            "level": level,
+            "goal_priority": priority,
+            "base_goal": base_goal,
+            "sessions": program_sessions,
+            "tags": parse_tags(tags_raw),
+            "created_at": now_iso(),
+        }
+
+        st.session_state["current_program"] = program_payload
+        st.success("Program generated.")
+
+    program = st.session_state.get("current_program")
+    if program:
+        st.subheader(program["name"])
+        st.caption(f"{program['weeks']} weeks · {program['level']} · {program['goal_priority']}")
+
+        for session in program["sessions"]:
+            with st.expander(
+                f"Week {session['week']} · {session['theme'].title()}",
+                expanded=session["week"] == 1,
+            ):
+                st.write(f"**Progression note:** {session['progression_note']}")
+                render_workout_preview(session["workout"], mobile=False)
+
+        c1, c2 = st.columns(2)
+
+        with c1:
+            if st.button("Save Program", use_container_width=True):
+                program_id = create_program_record(
+                    name=program["name"],
+                    weeks=program["weeks"],
+                    level=program["level"],
+                    goal_priority=program["goal_priority"],
+                    tags=program.get("tags", []),
+                    payload=program,
+                )
+                st.success(f"Saved program #{program_id}.")
+
+        with c2:
+            st.download_button(
+                "Download Program JSON",
+                data=export_json_bytes(program),
+                file_name=f"{clean_text(program['name']).replace(' ', '_')}.json",
+                mime="application/json",
+                use_container_width=True,
+            )
+
+
+# =========================================================
+# PAGE: DRILL LIBRARY
+# =========================================================
+
+def render_drill_library_page() -> None:
+    """
+    Render the Drill Library page with filtering, editing, and add-drill support.
+    """
+    st.title("Drill Library")
+
+    filter_col1, filter_col2, filter_col3, filter_col4 = st.columns(4)
+
+    with filter_col1:
+        category_filter = st.selectbox(
+            "Category",
+            ["", "warmup", "partner", "bag", "strength", "core", "cardio", "cooldown"],
+        )
+
+    with filter_col2:
+        level_filter = st.selectbox(
+            "Level",
+            ["", "beginner", "intermediate", "advanced", "fighter", "teen", "general fitness", "all"],
+        )
+
+    with filter_col3:
+        focus_filter = st.text_input("Tactical Focus Contains")
+
+    with filter_col4:
+        search_filter = st.text_input("Search")
+
+    drill_rows = get_drills(
+        category=category_filter or None,
+        level=level_filter or None,
+        include_archived=False,
+    )
+
+    if search_filter:
+        drill_rows = [
+            d for d in drill_rows
+            if search_filter.lower() in f"{d['name']} {d.get('tags', '')} {d.get('explanation', '')}".lower()
+        ]
+
+    if focus_filter:
+        drill_rows = [
+            d for d in drill_rows
+            if focus_filter.lower() in clean_text(d.get("tactical_focus", "")).lower()
+        ]
+
+    st.caption(f"{len(drill_rows)} drills found")
+
+    for d in drill_rows:
+        with st.expander(f"{d['name']} · {d['category']} · {d['level']}", expanded=False):
+            st.write(d.get("explanation", ""))
+            st.caption(d.get("athlete_description", ""))
+            st.markdown(list_to_pills(d.get("equipment", [])), unsafe_allow_html=True)
+
+            if d.get("tags"):
+                st.write(f"Tags: {d['tags']}")
+
+            st.write(f"Rounds default: {d.get('rounds_default', 0)}")
+            st.write(f"Round length: {seconds_to_label(to_int(d.get('round_length_sec', 0)))}")
+            st.write(f"Rest: {seconds_to_label(to_int(d.get('rest_sec', 0)))}")
+
+            if has_perm("edit_content"):
+                with st.form(f"edit_drill_{d['id']}"):
+                    new_name = st.text_input("Name", value=d["name"])
+                    new_expl = st.text_area("Explanation", value=d.get("explanation", ""))
+                    new_ath = st.text_area(
+                        "Athlete-Friendly Description",
+                        value=d.get("athlete_description", ""),
+                    )
+                    new_notes = st.text_area("Coaching Notes", value=d.get("coaching_notes", ""))
+                    new_tags = st.text_input("Tags", value=d.get("tags", ""))
+
+                    save_edit = st.form_submit_button("Save Changes")
+                    archive = st.form_submit_button("Archive Drill")
+
+                    if save_edit:
+                        run(
+                            """
+                            UPDATE drills
+                            SET name = ?, explanation = ?, athlete_description = ?,
+                                coaching_notes = ?, tags = ?, updated_at = ?
+                            WHERE id = ?
+                            """,
+                            (new_name, new_expl, new_ath, new_notes, new_tags, now_iso(), d["id"]),
+                        )
+                        current_user = get_current_user()
+                        actor = current_user["username"] if current_user else "system"
+                        log_audit("drill", d["id"], "update", {"name": new_name}, actor)
+                        st.success("Drill updated.")
+                        st.rerun()
+
+                    if archive and has_perm("archive"):
+                        run(
+                            "UPDATE drills SET is_archived = 1, updated_at = ? WHERE id = ?",
+                            (now_iso(), d["id"]),
+                        )
+                        current_user = get_current_user()
+                        actor = current_user["username"] if current_user else "system"
+                        log_audit("drill", d["id"], "archive", {"archived": True}, actor)
+                        st.success("Drill archived.")
+                        st.rerun()
+
+    if has_perm("edit_content"):
+        st.markdown("---")
+        st.subheader("Add Drill")
+
+        with st.form("add_drill_form"):
+            c1, c2 = st.columns(2)
+
+            with c1:
+                name = st.text_input("Name")
+                category = st.selectbox(
+                    "Category",
+                    ["warmup", "partner", "bag", "strength", "core", "cardio", "cooldown"],
+                    key="add_drill_category",
+                )
+                subcategory = st.text_input("Subcategory")
+                level = st.selectbox(
+                    "Level",
+                    ["beginner", "intermediate", "advanced", "fighter", "teen", "general fitness", "all"],
+                    key="add_drill_level",
+                )
+                equipment = st.multiselect(
+                    "Equipment",
+                    [
+                        "bodyweight",
+                        "jump rope",
+                        "heavy bag",
+                        "dumbbells",
+                        "kettlebells",
+                        "medicine ball",
+                        "bands",
+                        "bench",
+                        "boxes",
+                        "sled",
+                        "cables",
+                    ],
+                    default=["bodyweight"],
+                    key="add_drill_equipment",
+                )
+                stance_relevance = st.selectbox("Stance Relevance", ["both", "orthodox", "southpaw"])
+                tactical_focus = st.text_input("Tactical Focus")
+                intensity = st.selectbox("Default Intensity", ["technical", "moderate", "high", "recovery"])
+
+            with c2:
+                explanation = st.text_area("Coach-Facing Explanation")
+                athlete_description = st.text_area("Athlete-Friendly Description")
+                coaching_notes = st.text_area("Coaching Notes")
+                tags = st.text_input("Tags")
+                rounds_default = st.number_input("Rounds Default", min_value=0, value=3)
+                round_length_sec = st.number_input("Round Length (sec)", min_value=0, value=180)
+                rest_sec = st.number_input("Rest (sec)", min_value=0, value=30)
+                low_impact_ok = st.checkbox("Low Impact OK", value=True)
+                needs_partner = st.checkbox("Needs Partner")
+                needs_bag = st.checkbox("Needs Bag")
+
+            submit = st.form_submit_button("Add Drill", use_container_width=True)
+
+            if submit:
+                run(
+                    """
+                    INSERT INTO drills (
+                        name, category, subcategory, level, equipment_json, stance_relevance,
+                        coaching_notes, constraints_json, explanation, athlete_description,
+                        tags, rounds_default, round_length_sec, rest_sec, intensity,
+                        tactical_focus, image_path, is_archived, created_by, created_at, updated_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)
+                    """,
+                    (
+                        name,
+                        category,
+                        subcategory,
+                        level,
+                        dump_json(equipment),
+                        stance_relevance,
+                        coaching_notes,
+                        dump_json({
+                            "low_impact_ok": low_impact_ok,
+                            "needs_partner": needs_partner,
+                            "needs_bag": needs_bag,
+                        }),
+                        explanation,
+                        athlete_description,
+                        tags,
+                        rounds_default,
+                        round_length_sec,
+                        rest_sec,
+                        intensity,
+                        tactical_focus,
+                        None,
+                        get_current_user()["username"] if get_current_user() else "system",
+                        now_iso(),
+                        now_iso(),
+                    ),
+                )
+
+                row = fetch_one("SELECT last_insert_rowid() AS id")
+                new_id = row["id"]
+
+                current_user = get_current_user()
+                actor = current_user["username"] if current_user else "system"
+                log_audit("drill", new_id, "create", {"name": name}, actor)
+
+                st.success("Drill added.")
+                st.rerun()
+
+
+# =========================================================
+# PAGE: SAVED WORKOUTS
+# =========================================================
+
+def render_saved_workouts_page() -> None:
+    """
+    Render the Saved Workouts page with filters, preview, loading, editing, and version saves.
+    """
+    st.title("Saved Workouts")
+
+    f1, f2, f3, f4, f5, f6 = st.columns(6)
+
+    with f1:
+        search = st.text_input("Search")
+
+    with f2:
+        coach_filter = st.text_input("Coach")
+
+    with f3:
+        class_type = st.selectbox(
+            "Class Type",
+            ["", "boxing", "boxing + strength", "boxing + cardio", "strength-only", "cardio-only", "mixed class"],
+        )
+
+    with f4:
+        level = st.selectbox(
+            "Level",
+            ["", "beginner", "intermediate", "advanced", "fighter", "teen", "general fitness"],
+        )
+
+    with f5:
+        status_filter = st.selectbox("Status", ["", "draft", "completed"])
+
+    with f6:
+        favorites_only = st.checkbox("Favorites Only")
+
+    tag_filter = st.text_input("Tag Contains")
+
+    rows = get_workouts_filtered(
+        search=search,
+        coach_filter=coach_filter,
+        class_type=class_type,
+        level=level,
+        tag_filter=tag_filter,
+        status_filter=status_filter,
+        favorites_only=favorites_only,
+    )
+
+    st.caption(f"{len(rows)} workouts found")
+
+    for row in rows:
+        payload = load_json(row["payload_json"], {})
+
+        with st.expander(
+            f"#{row['id']} · {row['name']} · v{row['version']} · {row['status']}",
+            expanded=False,
+        ):
+            c1, c2 = st.columns([3, 1])
+
+            with c1:
+                render_workout_preview(payload, mobile=False)
+
+            with c2:
+                st.write(f"Coach: {row['coach']}")
+                st.write(f"Tags: {row['tags']}")
+                st.write(f"Favorite: {'Yes' if row['is_favorite'] else 'No'}")
+                st.write(f"Updated: {row['updated_at']}")
+
+                if st.button("Load into Generate Class", key=f"load_workout_{row['id']}", use_container_width=True):
+                    st.session_state["current_workout"] = payload
+                    st.session_state["nav"] = "Generate Class"
+                    st.rerun()
+
+                if has_perm("favorite") and st.button(
+                    "Toggle Favorite",
+                    key=f"fav_{row['id']}",
+                    use_container_width=True,
+                ):
+                    toggle_workout_favorite(row["id"])
+                    st.rerun()
+
+                if has_perm("delete") and st.button(
+                    "Delete Workout",
+                    key=f"delete_{row['id']}",
+                    use_container_width=True,
+                ):
+                    delete_workout_record(row["id"])
+                    st.warning("Workout deleted.")
+                    st.rerun()
+
+                st.download_button(
+                    "Download JSON",
+                    data=export_json_bytes(payload),
+                    file_name=f"workout_{row['id']}.json",
+                    mime="application/json",
+                    key=f"download_json_{row['id']}",
+                    use_container_width=True,
+                )
+
+                st.download_button(
+                    "Download TXT",
+                    data=export_workout_txt(payload),
+                    file_name=f"workout_{row['id']}.txt",
+                    mime="text/plain",
+                    key=f"download_txt_{row['id']}",
+                    use_container_width=True,
+                )
+
+            if has_perm("edit_content"):
+                st.markdown("### Quick Edit + Save New Version")
+                editor_key = f"saved_workout_editor_{row['id']}"
+                if editor_key not in st.session_state:
+                    st.session_state[editor_key] = payload
+               
+                edited = render_workout_editor(editor_key)
+
+                if edited and st.button(
+                    "Save New Version",
+                    key=f"save_new_version_{row['id']}",
+                    use_container_width=True,
+                ):
+                    update_workout_record(
+                        workout_id=row["id"],
+                        workout=edited,
+                        status=row["status"],
+                        favorite=bool(row["is_favorite"]),
+                    )
+                    st.success("Saved new version.")
+                    st.rerun()
+
+            audit_rows = get_audit_entries(entity_type="workout", entity_id=row["id"], limit=8)
+            if audit_rows:
+                st.markdown("### Version / Audit History")
+                for entry in audit_rows:
+                    st.caption(f"{entry['created_at']} · {entry['action']} · {entry['actor']}")
+
+    st.markdown("---")
+    st.subheader("Coach Mobile View")
+
+    if rows:
+        selected_id = st.selectbox(
+            "Choose Workout",
+            [r["id"] for r in rows],
+            format_func=lambda x: f"Workout #{x}",
+        )
+        chosen_row = get_workout_by_id(selected_id)
+        if chosen_row:
+            render_workout_preview(load_json(chosen_row["payload_json"], {}), mobile=True)
 
 # =========================================================
 # NAVIGATION ROUTER (REAL PAGES SO FAR)
@@ -3075,23 +3603,13 @@ elif nav == "Generate Class":
     render_generate_class_page()
 
 elif nav == "Generate Program":
-    require_permission("generate")
-    render_placeholder_page(
-        "Generate Program",
-        "Program generation UI will be added in the next phase."
-    )
+    render_generate_program_page()
 
 elif nav == "Drill Library":
-    render_placeholder_page(
-        "Drill Library",
-        "Drill library CRUD UI will be added in the next phase."
-    )
+    render_drill_library_page()
 
 elif nav == "Saved Workouts":
-    render_placeholder_page(
-        "Saved Workouts",
-        "Saved workout browsing and editing will be added in the next phase."
-    )
+    render_saved_workouts_page()
 
 elif nav == "Templates":
     render_placeholder_page(
@@ -3122,4 +3640,3 @@ elif nav == "Settings":
         "Settings",
         "Settings UI will be added in a later phase."
     )
-
