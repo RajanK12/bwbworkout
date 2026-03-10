@@ -3555,6 +3555,471 @@ def render_saved_workouts_page() -> None:
         chosen_row = get_workout_by_id(selected_id)
         if chosen_row:
             render_workout_preview(load_json(chosen_row["payload_json"], {}), mobile=True)
+# =========================================================
+# PAGE: TEMPLATES
+# =========================================================
+
+def render_templates_page() -> None:
+    """
+    Render the Templates page using the existing template helpers.
+    """
+    st.title("Templates")
+
+    if not has_perm("manage_templates") and not has_perm("generate"):
+        st.error("You do not have permission to access Templates.")
+        return
+
+    templates = get_templates(include_archived=False)
+
+    st.caption(f"{len(templates)} active templates")
+
+    if not templates:
+        st.info("No templates saved yet.")
+    else:
+        for row in templates:
+            payload = load_json(row["payload_json"], {})
+            with st.expander(f"#{row['id']} · {row['name']} · {row['template_type']}", expanded=False):
+                st.write(row["description"] or "")
+                if row["tags"]:
+                    st.caption(f"Tags: {row['tags']}")
+
+                if isinstance(payload, dict) and payload.get("sections"):
+                    render_workout_preview(payload, mobile=False)
+                else:
+                    st.json(payload)
+
+                c1, c2, c3 = st.columns(3)
+
+                with c1:
+                    if st.button(
+                        "Load Template",
+                        key=f"load_template_{row['id']}",
+                        use_container_width=True,
+                    ):
+                        st.session_state["current_workout"] = payload
+                        st.session_state["nav"] = "Generate Class"
+                        st.success("Template loaded into Generate Class.")
+                        st.rerun()
+
+                with c2:
+                    if has_perm("manage_templates") and st.button(
+                        "Duplicate Template",
+                        key=f"duplicate_template_{row['id']}",
+                        use_container_width=True,
+                    ):
+                        new_id = duplicate_template(row["id"])
+                        st.success(f"Template duplicated as #{new_id}.")
+                        st.rerun()
+
+                with c3:
+                    if has_perm("archive") and st.button(
+                        "Archive Template",
+                        key=f"archive_template_{row['id']}",
+                        use_container_width=True,
+                    ):
+                        archive_template(row["id"])
+                        st.warning("Template archived.")
+                        st.rerun()
+
+    if has_perm("manage_templates") and st.session_state.get("current_workout"):
+        st.markdown("---")
+        st.subheader("Save Current Workout as Template")
+
+        with st.form("save_template_form"):
+            name = st.text_input("Template Name")
+            description = st.text_area("Description")
+            tags = st.text_input("Tags", value="template,bwb")
+            save_template = st.form_submit_button("Save Template", use_container_width=True)
+
+            if save_template:
+                if not clean_text(name):
+                    st.error("Template name is required.")
+                else:
+                    template_id = create_template(
+                        name=clean_text(name),
+                        template_type="workout",
+                        description=description,
+                        tags=parse_tags(tags),
+                        payload=st.session_state["current_workout"],
+                    )
+                    st.success(f"Template #{template_id} saved.")
+                    st.rerun()
+
+
+# =========================================================
+# PAGE: WHITEBOARD ARCHIVE
+# =========================================================
+
+def render_whiteboard_archive_page() -> None:
+    """
+    Render the Whiteboard Archive page using the existing whiteboard helpers.
+    """
+    if not has_perm("whiteboard"):
+        st.error("You do not have permission to access Whiteboard Archive.")
+        return
+
+    st.title("Whiteboard Archive")
+
+    with st.form("whiteboard_upload_form"):
+        c1, c2 = st.columns(2)
+
+        with c1:
+            title = st.text_input(
+                "Title",
+                value=f"Whiteboard {datetime.now().strftime('%b %d')}",
+            )
+            upload = st.file_uploader(
+                "Upload Whiteboard Photo",
+                type=["png", "jpg", "jpeg", "webp"],
+                key="whiteboard_upload",
+            )
+            camera = st.camera_input("Or Capture From Camera", key="whiteboard_camera")
+
+        with c2:
+            notes = st.text_area("Notes")
+            tags = st.text_input("Tags", value="whiteboard,class")
+            linked_workout_id = st.number_input(
+                "Link Workout ID (optional)",
+                min_value=0,
+                value=0,
+            )
+            linked_program_id = st.number_input(
+                "Link Program ID (optional)",
+                min_value=0,
+                value=0,
+            )
+
+        submit = st.form_submit_button("Save Whiteboard", use_container_width=True)
+
+        if submit:
+            source = camera if camera is not None else upload
+
+            if source is None:
+                st.error("Upload or capture an image first.")
+            elif not clean_text(title):
+                st.error("Title is required.")
+            else:
+                current_user = get_current_user()
+                whiteboard_id = create_whiteboard_record(
+                    title=clean_text(title),
+                    uploaded_file=source,
+                    notes=notes,
+                    tags=tags,
+                    linked_workout_id=linked_workout_id or None,
+                    linked_program_id=linked_program_id or None,
+                    coach=current_user["display_name"] if current_user else "",
+                )
+                st.success(f"Whiteboard #{whiteboard_id} saved.")
+                st.rerun()
+
+    st.markdown("---")
+
+    rows = get_whiteboards()
+    st.caption(f"{len(rows)} saved whiteboards")
+
+    if not rows:
+        st.info("No whiteboards saved yet.")
+    else:
+        for row in rows:
+            with st.expander(f"#{row['id']} · {row['title']} · {row['created_at']}", expanded=False):
+                if row["file_path"] and os.path.exists(row["file_path"]):
+                    st.image(row["file_path"], use_container_width=True)
+                else:
+                    st.warning("Image file not found on disk.")
+
+                if row["notes"]:
+                    st.write(row["notes"])
+
+                if row["tags"]:
+                    st.caption(f"Tags: {row['tags']}")
+
+                meta = []
+                if row["coach"]:
+                    meta.append(f"Coach: {row['coach']}")
+                if row["linked_workout_id"]:
+                    meta.append(f"Linked workout: #{row['linked_workout_id']}")
+                if row["linked_program_id"]:
+                    meta.append(f"Linked program: #{row['linked_program_id']}")
+                if meta:
+                    st.caption(" | ".join(meta))
+
+                if has_perm("delete") and st.button(
+                    "Delete Whiteboard",
+                    key=f"delete_whiteboard_{row['id']}",
+                    use_container_width=True,
+                ):
+                    delete_whiteboard_record(row["id"])
+                    st.warning("Whiteboard deleted.")
+                    st.rerun()
+
+
+# =========================================================
+# PAGE: IMPORT CONTENT
+# =========================================================
+
+def render_import_content_page() -> None:
+    """
+    Render the Import Content page for bulk drill imports.
+    """
+    if not has_perm("import"):
+        st.error("You do not have permission to access Import Content.")
+        return
+
+    st.title("Import Content")
+    st.write("Bulk import drill banks from CSV or Excel.")
+
+    uploaded = st.file_uploader(
+        "Upload CSV or XLSX",
+        type=["csv", "xlsx"],
+        key="bulk_import_file",
+    )
+
+    if uploaded is None:
+        st.info("Upload a CSV or XLSX file to preview and import drills.")
+        return
+
+    try:
+        if uploaded.name.lower().endswith(".csv"):
+            df = pd.read_csv(uploaded)
+        else:
+            df = pd.read_excel(uploaded)
+    except Exception as exc:
+        st.error(f"Could not read file: {exc}")
+        return
+
+    st.subheader("Preview")
+    st.dataframe(df, use_container_width=True)
+
+    required = ["name", "category", "level"]
+    missing = [col for col in required if col not in df.columns]
+
+    if missing:
+        st.error(f"Missing required columns: {missing}")
+        return
+
+    with st.form("import_confirm_form"):
+        st.markdown("### Column Mapping")
+
+        equipment_col = st.selectbox("Equipment Column", [""] + list(df.columns))
+        tags_col = st.selectbox("Tags Column", [""] + list(df.columns))
+        explanation_col = st.selectbox("Explanation Column", [""] + list(df.columns))
+        athlete_desc_col = st.selectbox("Athlete Description Column", [""] + list(df.columns))
+        coaching_notes_col = st.selectbox("Coaching Notes Column", [""] + list(df.columns))
+        rounds_col = st.selectbox("Rounds Column", [""] + list(df.columns))
+        round_len_col = st.selectbox("Round Length Column", [""] + list(df.columns))
+        rest_col = st.selectbox("Rest Column", [""] + list(df.columns))
+        tactical_focus_col = st.selectbox("Tactical Focus Column", [""] + list(df.columns))
+        subcategory_col = st.selectbox("Subcategory Column", [""] + list(df.columns))
+        stance_col = st.selectbox("Stance Relevance Column", [""] + list(df.columns))
+
+        do_import = st.form_submit_button("Validate + Import", use_container_width=True)
+
+        if do_import:
+            preview_results: List[Dict[str, Any]] = []
+            inserted = 0
+            skipped = 0
+
+            valid_categories = {"warmup", "partner", "bag", "strength", "core", "cardio", "cooldown"}
+
+            for _, row in df.iterrows():
+                name = clean_text(row.get("name"))
+                category = clean_text(row.get("category")).lower()
+                level = clean_text(row.get("level")).lower() or "all"
+
+                if not name or category not in valid_categories:
+                    skipped += 1
+                    preview_results.append({"name": name or "[blank]", "status": "skipped_invalid"})
+                    continue
+
+                dupe = fetch_one(
+                    """
+                    SELECT id FROM drills
+                    WHERE lower(name) = lower(?) AND category = ? AND is_archived = 0
+                    """,
+                    (name, category),
+                )
+                if dupe:
+                    skipped += 1
+                    preview_results.append({"name": name, "status": "skipped_duplicate"})
+                    continue
+
+                equipment = ["bodyweight"]
+                if equipment_col:
+                    equipment = parse_tags(str(row.get(equipment_col, "bodyweight"))) or ["bodyweight"]
+
+                tags_value = str(row.get(tags_col, "")) if tags_col else ""
+                explanation = str(row.get(explanation_col, "")) if explanation_col else ""
+                athlete_desc = str(row.get(athlete_desc_col, explanation)) if athlete_desc_col else explanation
+                coaching_notes = str(row.get(coaching_notes_col, "")) if coaching_notes_col else ""
+                tactical_focus = str(row.get(tactical_focus_col, "")) if tactical_focus_col else ""
+                subcategory = str(row.get(subcategory_col, "")) if subcategory_col else ""
+                stance_relevance = str(row.get(stance_col, "both")) if stance_col else "both"
+                rounds_default = to_int(row.get(rounds_col, 0)) if rounds_col else 0
+                round_length_sec = to_int(row.get(round_len_col, 0)) if round_len_col else 0
+                rest_sec = to_int(row.get(rest_col, 0)) if rest_col else 0
+
+                run(
+                    """
+                    INSERT INTO drills (
+                        name, category, subcategory, level, equipment_json, stance_relevance,
+                        coaching_notes, constraints_json, explanation, athlete_description,
+                        tags, rounds_default, round_length_sec, rest_sec, intensity,
+                        tactical_focus, image_path, is_archived, created_by, created_at, updated_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)
+                    """,
+                    (
+                        name,
+                        category,
+                        subcategory,
+                        level,
+                        dump_json(equipment),
+                        stance_relevance or "both",
+                        coaching_notes,
+                        dump_json({
+                            "low_impact_ok": True,
+                            "needs_partner": category == "partner",
+                            "needs_bag": category == "bag",
+                        }),
+                        explanation,
+                        athlete_desc,
+                        tags_value,
+                        rounds_default,
+                        round_length_sec,
+                        rest_sec,
+                        "moderate",
+                        tactical_focus,
+                        None,
+                        get_current_user()["username"] if get_current_user() else "system",
+                        now_iso(),
+                        now_iso(),
+                    ),
+                )
+
+                new_row = fetch_one("SELECT last_insert_rowid() AS id")
+                new_id = new_row["id"]
+
+                current_user = get_current_user()
+                actor = current_user["username"] if current_user else "system"
+                log_audit("drill", new_id, "import_create", {"name": name}, actor)
+
+                inserted += 1
+                preview_results.append({"name": name, "status": "imported"})
+
+            st.success(f"Imported {inserted} drills. Skipped {skipped}.")
+            st.dataframe(pd.DataFrame(preview_results), use_container_width=True)
+
+
+# =========================================================
+# PAGE: SETTINGS
+# =========================================================
+
+def render_settings_page() -> None:
+    """
+    Render the Settings page for account info and basic user management.
+    """
+    st.title("Settings")
+
+    current_user = get_current_user()
+
+    st.subheader("Account")
+    if current_user:
+        st.write(f"Logged in as **{current_user['display_name']}** (`{current_user['username']}`)")
+        st.write(f"Role: **{current_user['role']}**")
+
+    st.markdown("---")
+    st.subheader("Create Staff User")
+
+    if has_perm("manage_users"):
+        with st.form("create_user_form"):
+            username = st.text_input("Username")
+            display_name = st.text_input("Display Name")
+            password = st.text_input("Password", type="password")
+            role = st.selectbox("Role", ["admin", "coach", "assistant", "read_only"])
+
+            create_user = st.form_submit_button("Create User", use_container_width=True)
+
+            if create_user:
+                username_clean = clean_text(username)
+                display_name_clean = clean_text(display_name)
+
+                if not username_clean or not display_name_clean or not password:
+                    st.error("Username, display name, and password are required.")
+                else:
+                    try:
+                        run(
+                            """
+                            INSERT INTO users (
+                                username, password_hash, role, display_name, is_active, created_at
+                            )
+                            VALUES (?, ?, ?, ?, 1, ?)
+                            """,
+                            (
+                                username_clean,
+                                sha256_text(password),
+                                role,
+                                display_name_clean,
+                                now_iso(),
+                            ),
+                        )
+                        row = fetch_one("SELECT last_insert_rowid() AS id")
+                        new_id = row["id"]
+
+                        actor = current_user["username"] if current_user else "system"
+                        log_audit(
+                            "user",
+                            new_id,
+                            "create",
+                            {
+                                "username": username_clean,
+                                "display_name": display_name_clean,
+                                "role": role,
+                            },
+                            actor,
+                        )
+                        st.success("User created.")
+                        st.rerun()
+                    except sqlite3.IntegrityError:
+                        st.error("Username already exists.")
+
+        users = fetch_all("SELECT * FROM users ORDER BY created_at DESC")
+
+        st.markdown("### Existing Users")
+        for u in users:
+            with st.expander(f"{u['display_name']} · {u['username']} · {u['role']}", expanded=False):
+                st.caption(f"Created: {u['created_at']}")
+                st.caption(f"Active: {'Yes' if u['is_active'] else 'No'}")
+
+                toggle_label = "Deactivate" if u["is_active"] else "Activate"
+                if st.button(toggle_label, key=f"toggle_user_{u['id']}", use_container_width=True):
+                    new_active = 0 if u["is_active"] else 1
+                    run(
+                        "UPDATE users SET is_active = ? WHERE id = ?",
+                        (new_active, u["id"]),
+                    )
+                    actor = current_user["username"] if current_user else "system"
+                    log_audit(
+                        "user",
+                        u["id"],
+                        "toggle_active",
+                        {"is_active": bool(new_active)},
+                        actor,
+                    )
+                    st.rerun()
+    else:
+        st.info("Only admins can manage users.")
+
+    st.markdown("---")
+    st.subheader("Deployment Notes")
+    st.code(
+        "streamlit run app.py\n"
+        "# Optional env vars:\n"
+        "BWB_DB_PATH=bwb_day_to_day.db\n"
+        "BWB_UPLOAD_DIR=uploads\n"
+        "BWB_ADMIN_USERNAME=admin\n"
+        "BWB_ADMIN_PASSWORD=admin123",
+        language="bash",
+    )
 
 # =========================================================
 # NAVIGATION ROUTER (REAL PAGES SO FAR)
