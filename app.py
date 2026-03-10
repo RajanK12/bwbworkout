@@ -3578,13 +3578,25 @@ elif nav == "Saved Workouts":
     render_saved_workouts_page()
 
 elif nav == "Templates":
-    render_templates_page()
+    render_placeholder_page(
+        "Templates",
+        "Template management UI has not been added yet."
+    )
 
 elif nav == "Whiteboard Archive":
-    render_whiteboard_archive_page()
+    render_placeholder_page(
+        "Whiteboard Archive",
+        "Whiteboard archive UI has not been added yet."
+    )
 
 elif nav == "Import Content":
-    render_import_content_page()
+    render_placeholder_page(
+        "Import Content",
+        "Import content UI has not been added yet."
+    )
 
 elif nav == "Settings":
-    render_settings_page()
+    render_placeholder_page(
+        "Settings",
+        "Settings UI has not been added yet."
+    )
