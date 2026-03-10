@@ -749,11 +749,11 @@ def render_user_badge() -> None:
 
 
 def get_navigation_options() -> List[str]:
-    """Return the sidebar navigation options."""
     return [
         "Dashboard",
         "Generate Class",
         "Generate Program",
+        "Saved Programs",
         "Drill Library",
         "Saved Workouts",
         "Templates",
@@ -4020,6 +4020,153 @@ def render_settings_page() -> None:
         "BWB_ADMIN_PASSWORD=admin123",
         language="bash",
     )
+def render_saved_programs_page() -> None:
+    """
+    Render the Saved Programs page using the existing program CRUD helpers.
+    Lists saved programs, previews weekly workouts, allows loading back into
+    session state, and allows archiving when permitted.
+    """
+    st.title("Saved Programs")
+
+    if not has_perm("generate") and not has_perm("view_dashboard"):
+        st.error("You do not have permission to access Saved Programs.")
+        return
+
+    c1, c2, c3, c4 = st.columns(4)
+
+    with c1:
+        search = st.text_input("Search")
+
+    with c2:
+        level_filter = st.selectbox(
+            "Level",
+            ["", "beginner", "intermediate", "advanced", "fighter", "teen", "general fitness"],
+            key="saved_programs_level_filter",
+        )
+
+    with c3:
+        goal_filter = st.text_input("Goal Priority")
+
+    with c4:
+        include_archived = st.checkbox("Show Archived", value=False)
+
+    rows = get_programs(include_archived=include_archived)
+
+    filtered_rows: List[sqlite3.Row] = []
+    search_lower = clean_text(search).lower()
+    goal_lower = clean_text(goal_filter).lower()
+
+    for row in rows:
+        if level_filter and row["level"] != level_filter:
+            continue
+
+        if goal_lower and goal_lower not in clean_text(row["goal_priority"]).lower():
+            continue
+
+        blob = " ".join(
+            [
+                clean_text(row["name"]),
+                clean_text(row["level"]),
+                clean_text(row["goal_priority"]),
+                clean_text(row["tags"] or ""),
+            ]
+        ).lower()
+
+        if search_lower and search_lower not in blob:
+            continue
+
+        filtered_rows.append(row)
+
+    st.caption(f"{len(filtered_rows)} programs found")
+
+    if not filtered_rows:
+        st.info("No saved programs match your filters.")
+        return
+
+    for row in filtered_rows:
+        payload = load_json(row["payload_json"], {})
+
+        header = (
+            f"#{row['id']} · {row['name']} · "
+            f"{row['weeks']} weeks · {row['level']} · {row['goal_priority']}"
+        )
+
+        with st.expander(header, expanded=False):
+            meta_bits = []
+            if row["tags"]:
+                meta_bits.append(f"Tags: {row['tags']}")
+            meta_bits.append(f"Updated: {row['updated_at']}")
+            if row["is_archived"]:
+                meta_bits.append("Archived")
+            st.caption(" | ".join(meta_bits))
+
+            top_a, top_b = st.columns([3, 1])
+
+            with top_a:
+                sessions = payload.get("sessions", [])
+                if sessions:
+                    st.markdown("### Weekly Breakdown")
+                    for session in sessions:
+                        week_num = session.get("week", "—")
+                        theme = clean_text(session.get("theme", "")).title()
+                        progression_note = session.get("progression_note", "")
+                        workout = session.get("workout", {})
+
+                        with st.expander(f"Week {week_num} · {theme}", expanded=False):
+                            if progression_note:
+                                st.write(f"**Progression note:** {progression_note}")
+
+                            if isinstance(workout, dict) and workout:
+                                render_workout_preview(workout, mobile=False)
+                            else:
+                                st.info("No workout data found for this week.")
+                else:
+                    st.info("This saved program does not contain any weekly sessions.")
+
+            with top_b:
+                st.write(f"**Created by:** {row['created_by'] or 'Unknown'}")
+                st.write(f"**Weeks:** {row['weeks']}")
+                st.write(f"**Level:** {row['level']}")
+                st.write(f"**Priority:** {row['goal_priority']}")
+
+                if st.button(
+                    "Load Program",
+                    key=f"load_program_{row['id']}",
+                    use_container_width=True,
+                ):
+                    st.session_state["current_program"] = payload
+                    st.success("Program loaded.")
+                    st.rerun()
+
+                st.download_button(
+                    "Download JSON",
+                    data=export_json_bytes(payload),
+                    file_name=f"program_{row['id']}.json",
+                    mime="application/json",
+                    key=f"download_program_json_{row['id']}",
+                    use_container_width=True,
+                )
+
+                if has_perm("archive") and not row["is_archived"]:
+                    if st.button(
+                        "Archive Program",
+                        key=f"archive_program_{row['id']}",
+                        use_container_width=True,
+                    ):
+                        archive_program(row["id"])
+                        st.warning("Program archived.")
+                        st.rerun()
+
+            audit_rows = get_audit_entries(
+                entity_type="program",
+                entity_id=row["id"],
+                limit=8,
+            )
+            if audit_rows:
+                st.markdown("### Audit History")
+                for entry in audit_rows:
+                    st.caption(f"{entry['created_at']} · {entry['action']} · {entry['actor']}")
+
 
 # =========================================================
 # NAVIGATION ROUTER (REAL PAGES)
@@ -4035,6 +4182,9 @@ elif nav == "Generate Class":
 
 elif nav == "Generate Program":
     render_generate_program_page()
+
+elif nav == "Saved Programs":
+    render_saved_programs_page()
 
 elif nav == "Drill Library":
     render_drill_library_page()
